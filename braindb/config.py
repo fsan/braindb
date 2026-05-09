@@ -3,8 +3,9 @@ import os
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # LLM provider profiles. Flip the whole stack by setting LLM_PROFILE in .env.
-# Each profile is just a LiteLLM model prefix + the env var holding its API key.
-# Adding a new provider is a dict entry, no code change.
+# Each profile is a LiteLLM model prefix + the env var holding its API key,
+# plus an optional base_url for self-hosted OpenAI-compatible servers (vLLM,
+# Ollama, llama.cpp). Adding a new provider is a dict entry, no code change.
 _LLM_PROFILES: dict[str, dict[str, str]] = {
     "nim": {
         "model": "nvidia_nim/google/gemma-4-31b-it",
@@ -13,6 +14,11 @@ _LLM_PROFILES: dict[str, dict[str, str]] = {
     "deepinfra": {
         "model": "deepinfra/google/gemma-4-31B-it",
         "api_key_env": "DEEPINFRA_API_KEY",
+    },
+    "vllm_workstation": {
+        "model": "openai/cyankiwi/gemma-4-31B-it-AWQ-4bit",
+        "api_key_env": "VLLM_API_KEY",
+        "base_url": "http://host.docker.internal:8002/v1",
     },
 }
 
@@ -54,7 +60,17 @@ class Settings(BaseSettings):
 
     @property
     def resolved_api_key(self) -> str:
-        return os.getenv(_LLM_PROFILES[self.llm_profile]["api_key_env"], "")
+        profile = _LLM_PROFILES[self.llm_profile]
+        key = os.getenv(profile["api_key_env"], "")
+        # Self-hosted profiles (vLLM/Ollama) may run without auth, but the
+        # OpenAI client still needs a non-empty key — supply a placeholder.
+        if not key and profile.get("base_url"):
+            return "EMPTY"
+        return key
+
+    @property
+    def resolved_base_url(self) -> str | None:
+        return _LLM_PROFILES[self.llm_profile].get("base_url")
 
 
 settings = Settings()

@@ -337,6 +337,7 @@ The agent has these tools internally: `recall_memory`, `quick_search`, `save_fac
 **Setup (pick a provider)**:
 - **DeepInfra (default)**: set `LLM_PROFILE=deepinfra` and `DEEPINFRA_API_KEY=...` in `.env`. Get a key at https://deepinfra.com/
 - **NVIDIA NIM**: set `LLM_PROFILE=nim` and `NVIDIA_NIM_API_KEY=...` in `.env`. Get a key at https://build.nvidia.com/
+- **Self-hosted vLLM**: set `LLM_PROFILE=vllm_workstation` for a vLLM server bound to the Docker host's loopback at `:8002`. No API key needed if the server runs without auth. See [CONTRIBUTING.md](CONTRIBUTING.md) for how to add your own self-hosted profile.
 - Profiles live in `braindb/config.py::_LLM_PROFILES`. Add new providers there (e.g. `together`, `openai`) by adding a dict entry — no code change required.
 - Optional override: set `AGENT_MODEL=` in `.env` to use a non-default model for the active profile.
 
