@@ -13,7 +13,13 @@ services:
       AGENT_MODEL: ${AGENT_MODEL:-}
       NVIDIA_NIM_API_KEY: ${NVIDIA_NIM_API_KEY:-}
       DEEPINFRA_API_KEY: ${DEEPINFRA_API_KEY:-}
+      VLLM_API_KEY: ${VLLM_API_KEY:-}
       AGENT_VERBOSE: ${AGENT_VERBOSE:-false}
+    extra_hosts:
+      # Lets self-hosted profiles (e.g. vllm_workstation) reach a server bound
+      # to the Docker host's loopback. Docker Desktop sets this implicitly;
+      # the explicit form keeps the file portable to Linux Docker Engine.
+      - "host.docker.internal:host-gateway"
     ports:
       - "${API_PORT:-8000}:${API_PORT:-8000}"
     volumes:

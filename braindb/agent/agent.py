@@ -49,6 +49,7 @@ def create_braindb_agent() -> Agent:
     model = LitellmModel(
         model=settings.resolved_agent_model,
         api_key=settings.resolved_api_key,
+        base_url=settings.resolved_base_url,
     )
     set_tracing_disabled(disabled=True)
 

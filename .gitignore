@@ -13,6 +13,8 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+.venv/
+venv/
 
 # Test / lint artifacts
 .pytest_cache/

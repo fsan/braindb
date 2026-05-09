@@ -51,6 +51,22 @@ LiteLLM does the heavy lifting — providers are selected by a prefix in the mod
 
 No other code changes required — the agent resolves model and key through `settings.resolved_agent_model` and `settings.resolved_api_key`, which read the active profile.
 
+### Self-hosted OpenAI-compatible servers (vLLM, Ollama, llama.cpp)
+
+For a server you run yourself that speaks the OpenAI REST shape, the profile takes an optional third field, `base_url`, and uses LiteLLM's `openai/` prefix to route through the OpenAI-compatible code path:
+
+```python
+"vllm_workstation": {
+    "model": "openai/cyankiwi/gemma-4-31B-it-AWQ-4bit",
+    "api_key_env": "VLLM_API_KEY",
+    "base_url": "http://host.docker.internal:8002/v1",
+},
+```
+
+When `base_url` points at the Docker host (`host.docker.internal`), the `api` service in [`docker-compose.yml`](docker-compose.yml) needs `extra_hosts: ["host.docker.internal:host-gateway"]` so the container can reach the host's loopback. The compose file in this repo already declares it.
+
+If your server runs without auth, leave the matching `*_API_KEY` env var unset — `settings.resolved_api_key` falls back to the literal `"EMPTY"` for any profile that has a `base_url`, which keeps the OpenAI client happy.
+
 ## Adding a new database migration
 
 BrainDB uses raw-SQL Alembic migrations (no ORM). Current revision is in `alembic/versions/`.
