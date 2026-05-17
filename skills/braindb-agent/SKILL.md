@@ -35,6 +35,11 @@ it to "run SQL"** for recall or understanding — raw SQL discards the graph and
 embeddings. SQL is only ever for an explicit aggregate ("how many facts per
 source?"), which you can simply ask for in plain English anyway.
 
+Internally the agent now researches from **short previews** and reads a full
+body only by id (paging large ones, or delegating big documents to a
+subagent), so its context stays clean — just ask in natural language ("read
+and summarise datasource X"); it handles the chunking itself.
+
 ## RECALL — at conversation start, and whenever you need context
 
 Ask the agent in natural language. It handles keyword formulation, multi-query search, graph traversal, and summarization.

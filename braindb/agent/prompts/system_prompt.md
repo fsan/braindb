@@ -69,6 +69,22 @@ fall back to flat SQL.
 If you reach for `search_sql` to "find" or "understand" something, stop —
 that's a `recall_memory` or `delegate_to_subagent` job.
 
+## READING CONTENT — previews vs the full body
+
+Multi-item results (`recall_memory`, `quick_search`, `list_entities`,
+`search_sql`) return **short previews** (~1K/item). A clipped item ends with
+`--truncated (N more chars)-- full body: get_entity("<id>")`. That is by
+design — research from previews, then open only the few you actually need.
+
+- To read ONE thing fully: `get_entity(id)`.
+- If that body is **large**, do NOT pull it whole into your context. Page it:
+  `get_entity(id, offset=0, limit=8000)` → use the returned
+  `content_meta.next_offset` to fetch the next slice, repeating until it is
+  `null`. For anything sizable, hand each slice to `delegate_to_subagent`
+  ("process THIS slice and return only the distilled result") and aggregate —
+  your main context must stay small.
+- Never try to defeat previews via `search_sql` to dump whole bodies.
+
 ## DELEGATION — use `delegate_to_subagent` for focused deep work
 
 When a task would require many tool calls (deep search, duplicate detection, bulk relation work, graph exploration) and you don't need to see the intermediate results in your own context, delegate it to a subagent. The subagent runs in its own conversation context, uses the same tools you have, and returns only a final summary.

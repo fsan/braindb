@@ -21,6 +21,7 @@ from braindb.schemas.entities import (
     WikiCreate, WikiRead, WikiUpdate,
 )
 from braindb.services.activity_log import log_activity
+from braindb.services.search import slice_content
 from braindb.services.embedding_service import get_embedding_service
 from braindb.services.keyword_service import ensure_keyword_entities, link_entity_to_keywords, sync_keywords_for_entity
 
@@ -324,9 +325,23 @@ def create_wiki(body: WikiCreate):
 # ------------------------------------------------------------------ #
 
 @router.get("/{entity_id}")
-def get_entity(entity_id: UUID):
+def get_entity(
+    entity_id: UUID,
+    offset: int = Query(default=0, ge=0),
+    limit: int | None = Query(default=None, ge=1),
+):
+    """Full single-entity read. Pass offset/limit to page a large `content`
+    without flooding the caller — response then includes `content_meta`
+    {total_chars, offset, returned, next_offset}. Default (no offset/limit)
+    returns the full body, unchanged."""
     with get_conn() as conn:
-        return _flatten(_or_404(_fetch(conn, entity_id)))
+        ent = _flatten(_or_404(_fetch(conn, entity_id)))
+    if offset == 0 and limit is None:
+        return ent
+    chunk, meta = slice_content(ent.get("content"), offset, limit)
+    ent["content"] = chunk
+    ent["content_meta"] = meta
+    return ent
 
 
 # ------------------------------------------------------------------ #

@@ -37,7 +37,12 @@ embeddings+graph+ranking retrieval — the default for everything; `search_sql`
 is an exception only for a structured aggregate it cannot express) with 2-4
 queries around the subject to collect the candidate `fact`/`thought`/`source`
 entities (ids + contents). Ignore `keyword`-token entities (opaque slugs like
-`_x_1a2b`) — never sources.
+`_x_1a2b`) — never sources. Recall returns **previews** (~1K/item); facts are
+short so previews are usually whole. To read a long datasource/source/wiki
+fully, `get_entity(id)`; if it is large, **page it**
+(`get_entity(id, offset, limit)` → follow `content_meta.next_offset`) and/or
+hand each slice to `delegate_to_subagent` to distil — never load a big
+document into your own context.
 
 **Step 2 — Independent entity resolution (MANDATORY `delegate_to_subagent`).**
 Whenever ≥2 gathered facts could refer to different real people/things sharing

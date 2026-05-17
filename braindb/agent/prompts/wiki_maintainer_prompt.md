@@ -18,6 +18,12 @@ the surrounding reality before deciding.
 
 ## Research FIRST with the powerful tools (this is mandatory)
 
+Recall/list results are **short previews** (~1K/item) ending with
+`--truncated … get_entity("<id>")` when clipped — that is enough to triage.
+Open a full body only via `get_entity(id)`; if it is large, page it
+(`get_entity(id, offset, limit)` → follow `content_meta.next_offset`) or hand
+slices to a subagent. Never pull whole datasources/wikis into your context.
+
 Tool priority — use them in this order, do not skip to the bottom:
 
 1. **`recall_memory`** — the sophisticated retrieval (embeddings + graph +

@@ -74,9 +74,19 @@ curl "http://localhost:8000/api/v1/entities?entity_type=fact&source=user-stated&
 Query parameters: `entity_type`, `keyword`, `source`, `min_importance` (0-1), `limit` (1-200, default 50), `offset` (default 0).
 
 ### Get Entity by ID
+The **only full-content read**. Multi-item calls (context/search/list) return
+~1K previews ending `--truncated … get_entity("<id>")`; come here for the
+whole body.
 ```bash
 curl http://localhost:8000/api/v1/entities/<UUID>
+# Large body? page it (don't pull it whole):
+curl "http://localhost:8000/api/v1/entities/<UUID>?offset=0&limit=8000"
 ```
+With `offset`/`limit` the response adds `content_meta`:
+`{total_chars, offset, returned, next_offset}` — keep fetching `next_offset`
+until it is `null`. Default (no params) = full body, unchanged. For big
+documents, prefer delegating the read to a subagent via `/api/v1/agent/query`
+so the content never floods the caller's context.
 
 ### Delete Entity
 ```bash

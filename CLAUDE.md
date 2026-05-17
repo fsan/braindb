@@ -26,6 +26,12 @@ understanding must go through the sophisticated retrieval, never a flat SQL
    similarity, or understanding. If you're using SQL to *find* or *understand*
    something, you're doing it wrong — use `/memory/context`.
 
+**Previews vs full read:** all multi-item calls return short previews
+(~1K/item; a clipped one ends `--truncated … get_entity("<id>")`). Read a
+full body only by id: `GET /api/v1/entities/{id}`. For a large body, page it
+with `?offset=&limit=` (follow `content_meta.next_offset`) or delegate it to a
+subagent — never pull whole documents into context.
+
 ---
 
 ## At the Start of Every Session

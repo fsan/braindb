@@ -106,6 +106,19 @@ to flat SQL.
 If you're about to use `/memory/sql` to *find* or *understand* something,
 stop — that's a `/memory/context` (or delegated `/agent/query`) job.
 
+### Previews vs full body
+
+`/memory/context` (and `/memory/search`, `GET /entities`) return **short
+previews** per item (~1K); a clipped item ends with
+`--truncated (N more) -- full body: get_entity("<id>")`. That's intended —
+decide from previews, then read only what you need:
+
+- Full single entity: `GET /api/v1/entities/{id}`.
+- Large body: page it — `GET /api/v1/entities/{id}?offset=0&limit=8000`, then
+  follow `content_meta.next_offset` until it is `null`. For big documents,
+  prefer `POST /api/v1/agent/query` with "delegate to a subagent to read and
+  distil entity <id>" so the heavy content never enters this conversation.
+
 ## RECALL — Before Responding
 
 ### Step 1: Formulate targeted queries

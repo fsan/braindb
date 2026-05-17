@@ -34,7 +34,7 @@ from braindb.services.keyword_service import (
     link_entity_to_keywords,
     sync_keywords_for_entity,
 )
-from braindb.services.search import fuzzy_search, preview
+from braindb.services.search import fuzzy_search, preview, slice_content
 
 logger = logging.getLogger(__name__)
 
@@ -315,11 +315,22 @@ async def save_rule(
 
 @function_tool
 @_verbose("get_entity")
-async def get_entity(entity_id: str) -> str:
-    """Fetch a single entity by ID (returns JSON blob with all fields).
+async def get_entity(entity_id: str, offset: int = 0, limit: Optional[int] = None) -> str:
+    """Fetch ONE entity by ID — the full-content read (recall/list only give
+    previews; come here to read a thing fully).
+
+    For a LARGE body, page it with offset/limit instead of pulling it whole:
+    the response includes `content_meta` {total_chars, offset, returned,
+    next_offset}. Loop `next_offset` until null. To avoid polluting your own
+    context, hand each slice to `delegate_to_subagent` ("process THIS slice…")
+    and aggregate — never load a huge document into your main context.
 
     Args:
         entity_id: UUID of the entity.
+        offset: start char of the content slice (default 0).
+        limit: max chars of this slice (clamped to the server slice max).
+               If offset and limit are both omitted, the full body is returned
+               (legacy behaviour, unchanged).
     """
     try:
         with get_conn() as conn:
@@ -331,7 +342,14 @@ async def get_entity(entity_id: str) -> str:
         d = dict(row)
         d.pop("embedding", None)
         d.pop("search_vector", None)
-        return _truncate(json.dumps(d, default=str, indent=2))
+        if offset == 0 and limit is None:
+            return _truncate(json.dumps(d, default=str, indent=2))
+        # Explicit slice request → return exactly that slice + paging meta,
+        # NOT re-clipped by _truncate (slice is already bounded by SLICE_MAX).
+        chunk, meta = slice_content(d.get("content"), offset, limit)
+        d["content"] = chunk
+        d["content_meta"] = meta
+        return json.dumps(d, default=str, indent=2)
     except Exception as e:
         return _err(str(e))
 
