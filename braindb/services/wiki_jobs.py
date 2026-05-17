@@ -12,12 +12,22 @@ existing recall/agent infra by the routers. Here we only:
 Claim / status-transition / advisory-lock / accounted-change-gate helpers are
 added in later steps, alongside the endpoints that use them.
 """
+import os
 import re
 import uuid
 
 import psycopg2.extras
 
 ACTIVE_STATUSES = ("pending", "assigned")
+
+# Freshness window: an entity is only orphan-eligible once it has existed for
+# this many minutes, so the maintainer never wikis a subject whose ingest
+# burst of facts/relations has not settled yet. Same env-var pattern the
+# scheduler uses for its intervals (keeps this plumbing module config-import
+# free). MUST be measured on created_at, never updated_at — the unconditional
+# entities_updated_at BEFORE UPDATE trigger bumps updated_at on every recall
+# access, which would leave recalled entities perpetually "fresh".
+FRESHNESS_MINUTES = int(os.getenv("WIKI_FRESHNESS_MINUTES", "30"))
 
 # Inline reference token: [[ref:UUID]] or [[ref:UUID|display text]]
 REF_RE = re.compile(
@@ -122,6 +132,8 @@ def _orphan_conditions(exclude_job: bool = False) -> str:
     maintainer staleness guard to ignore the just-claimed triage row itself.
 
     An orphan is an entity that:
+      * has settled — `created_at` is older than FRESHNESS_MINUTES (so a
+        still-ingesting subject is not wikied half-formed),
       * is not the target of a `wiki --summarises--> e` relation,
       * is not listed in any wiki's `member_keyword_ids`,
       * is not referenced by an active (pending/assigned) wiki_job,
@@ -130,7 +142,8 @@ def _orphan_conditions(exclude_job: bool = False) -> str:
     """
     xj = " AND j.id <> %s" if exclude_job else ""
     return f"""
-        NOT EXISTS (
+        e.created_at < now() - make_interval(mins => {FRESHNESS_MINUTES})
+        AND NOT EXISTS (
             SELECT 1 FROM relations r
             JOIN entities w ON w.id = r.from_entity_id AND w.entity_type = 'wiki'
             WHERE r.relation_type = 'summarises' AND r.to_entity_id = e.id
@@ -303,6 +316,11 @@ def next_write_bucket(conn) -> dict | None:
     Pick the next unit of writer work (one wiki per call). A `create` job is
     its own bucket; `attach` jobs are grouped by target_wiki_id so the writer
     sees every new member of a wiki at once. Consolidate is handled by Step 5.
+
+    Dedup-first priority: pending jobs are ordered consolidate -> attach ->
+    create (then created_at). The moment the maintainer emits a `consolidate`
+    the writer drains it before creating/expanding more pages, so the wiki
+    set converges before it grows.
     """
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(
@@ -310,7 +328,11 @@ def next_write_bucket(conn) -> dict | None:
                       proposed_name, rationale, batch_id
                FROM wiki_job
                WHERE status='pending' AND job_type IN ('create','attach','consolidate')
-               ORDER BY created_at LIMIT 1"""
+               ORDER BY CASE job_type WHEN 'consolidate' THEN 0
+                                      WHEN 'attach'      THEN 1
+                                      ELSE 2 END,
+                        created_at
+               LIMIT 1"""
         )
         seed = cur.fetchone()
         if not seed:

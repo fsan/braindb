@@ -15,6 +15,10 @@ services:
       DEEPINFRA_API_KEY: ${DEEPINFRA_API_KEY:-}
       VLLM_API_KEY: ${VLLM_API_KEY:-}
       AGENT_VERBOSE: ${AGENT_VERBOSE:-false}
+      # Orphan freshness gate (the orphan SQL runs in this api process, not in
+      # the scheduler): an entity is wiki-eligible only once created_at is
+      # older than this many minutes, so still-ingesting subjects settle first.
+      WIKI_FRESHNESS_MINUTES: ${WIKI_FRESHNESS_MINUTES:-30}
     extra_hosts:
       # Lets self-hosted profiles (e.g. vllm_workstation) reach a server bound
       # to the Docker host's loopback. Docker Desktop sets this implicitly;
@@ -56,7 +60,7 @@ services:
       - local-network
     environment:
       BRAINDB_API_URL: http://api:${API_PORT:-8000}
-      WIKI_CRON_INTERVAL: ${WIKI_CRON_INTERVAL:-1200}
+      WIKI_CRON_INTERVAL: ${WIKI_CRON_INTERVAL:-120}
       WIKI_MAINTAIN_INTERVAL: ${WIKI_MAINTAIN_INTERVAL:-45}
       WIKI_WRITE_INTERVAL: ${WIKI_WRITE_INTERVAL:-60}
     volumes:
