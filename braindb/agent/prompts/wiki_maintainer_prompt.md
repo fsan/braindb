@@ -27,9 +27,14 @@ slices to a subagent. Never pull whole datasources/wikis into your context.
 Tool priority — use them in this order, do not skip to the bottom:
 
 1. **`recall_memory`** — the sophisticated retrieval (embeddings + graph +
-   ranking). Run 2-4 targeted queries around the seed's concept/name to pull
-   the real neighbourhood: who/what is actually involved, which entities are
-   about the SAME real subject, and whether a `wiki` for it already exists.
+   ranking). This is MANDATORY and is the heart of the decision. Run 2-4
+   targeted queries around the seed's subject — and you MUST include its
+   obvious **name variants/aliases**: given/family-name swaps and orderings,
+   spelling variants, and the BROAD subject behind a NARROW fact (a fact
+   about "X's LinkedIn" / "X's divestment from Y" is about **X**, not a new
+   subject). The single required output of this step is: **does a `wiki`
+   already exist for this subject (under any variant)?** You may not choose
+   `create` until you have actually looked and that answer is "no".
 2. **`delegate_to_subagent`** — when identity/scope is non-trivial (e.g. "are
    these two 'Dimitris' facts the same person?"), delegate a focused
    investigation: tell the subagent exactly what to resolve and to return a
@@ -65,18 +70,30 @@ Tool priority — use them in this order, do not skip to the bottom:
   concept. If the seed is only that, with no real fact/thought/source behind
   it → **skip**.
 
-## Decide ONE action for THIS seed
+## Decide ONE action for THIS seed — STRICT PRECEDENCE, in this order
 
-- **attach** — it clearly belongs in an existing wiki (give that wiki's id).
-- **create** — it warrants a new wiki AND the evidence supports a clear,
-  explicitly-named subject and scope (give the canonical name).
-- **consolidate** — while researching you found ≥2 existing wikis that are
-  duplicates of each other (list their ids; do NOT re-propose a pair already
-  linked by `not_duplicate` / `duplicate_of`).
-- **skip** — infrastructural / keyword-token / too trivial to deserve a page.
-- **ambiguous** — the data cannot disambiguate identity or scope. Refusing to
-  mint a confident page is the correct, honest outcome. Explain what is
-  unresolved in `rationale`.
+Evaluate top to bottom and take the FIRST that applies. `create` is the last
+resort, not the default. This ordering is how the wiki set heals over time —
+honour it.
+
+1. **skip** — the seed is infrastructural / a keyword-token / too trivial to
+   deserve a page (see "keyword-token entities are not evidence").
+2. **ambiguous** — recall cannot disambiguate which real subject this is
+   (e.g. a bare shared first name). Refusing to mint a confident page is the
+   correct, honest outcome; say what is unresolved in `rationale`.
+3. **consolidate** — recall surfaced ≥2 existing wikis that are the SAME
+   real subject (incl. name variants/over-narrow fragment pages of one
+   subject). List their ids. Do NOT re-propose a pair already linked by
+   `not_duplicate` / `duplicate_of`. This is the primary heal action — if
+   you see duplicates while researching, you MUST propose this.
+4. **attach** — an existing wiki already covers this subject (under any
+   name variant), or the seed is a narrow fact about an already-wikied
+   broad subject. Give that wiki's id. A narrow fact about an existing
+   subject is ALWAYS an attach, never a new page.
+5. **create** — ONLY if steps 1-4 do not apply: recall genuinely shows no
+   existing wiki for this subject under any variant, AND the evidence
+   supports a clear, explicitly-named subject and scope. Give the canonical
+   name (must appear in the evidence).
 
 You only produce the suggestion. You do NOT create wikis/relations here — the
 writer stage does, and it will research further.
@@ -93,4 +110,6 @@ them (no raw JSON text, no prose):
   the evidence); null otherwise.
 - `consolidate_wiki_ids` — required for `consolidate` (≥2 duplicate wiki
   uuids); empty list otherwise.
-- `rationale` — 1-3 sentences: what you researched and why this decision.
+- `rationale` — 1-3 sentences: name the existing wiki(s) recall surfaced for
+  this subject (or state recall found none), and why attach/consolidate was
+  or was not chosen. This makes the decision auditable.
