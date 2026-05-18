@@ -60,9 +60,7 @@ services:
       - local-network
     environment:
       BRAINDB_API_URL: http://api:${API_PORT:-8000}
-      WIKI_CRON_INTERVAL: ${WIKI_CRON_INTERVAL:-120}
-      WIKI_MAINTAIN_INTERVAL: ${WIKI_MAINTAIN_INTERVAL:-45}
-      WIKI_WRITE_INTERVAL: ${WIKI_WRITE_INTERVAL:-60}
+      WIKI_INTERVAL: ${WIKI_INTERVAL:-60}
     volumes:
       - .:/app
     command: python -m braindb.wiki_scheduler

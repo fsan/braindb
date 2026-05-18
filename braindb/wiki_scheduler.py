@@ -1,19 +1,16 @@
 """
-Always-on wiki scheduler. Runs as a sidecar docker service (Stage 2).
+Always-on wiki scheduler — ONE loop, like ingest_watcher.py (one interval).
 
-Structural clone of ingest_watcher.py: wait_for_api, then an infinite loop
-with independent interval timers. It only POSTs the existing Stage-1 wiki
-endpoints — it contains no pipeline logic of its own:
+Per tick:
+  1. POST /wiki/cron               — cheap, pure SQL, no LLM.
+  2. GET  /wiki/jobs?status=pending — cheap, pure SQL, no LLM. The gate.
+  3. if a pending `triage` job exists  -> POST /wiki/maintain  (one case, C1)
+  4. if pending suggestion jobs exist  -> POST /wiki/write, repeated to DRAIN
+       them (bounded) so consolidate/attach keep up instead of trickling.
+  5. nothing pending  -> NO LLM call this tick (idle == free).
 
-  * cron     — every WIKI_CRON_INTERVAL    -> POST /api/v1/wiki/cron
-               (read-only orphan scan, enqueues one triage job per orphan)
-  * maintain — every WIKI_MAINTAIN_INTERVAL -> POST /api/v1/wiki/maintain
-               (drains ONE triage case per tick — C1, per-case)
-  * write    — every WIKI_WRITE_INTERVAL    -> POST /api/v1/wiki/write
-               (writes ONE wiki per tick)
-
-The api and ingest watcher are untouched; a wiki run can never block file
-ingestion because this is an isolated process.
+The expensive LLM endpoints are never called speculatively: a tick with
+empty queues costs nothing. No multi-timer staggering, one env var.
 """
 import logging
 import os
@@ -23,10 +20,8 @@ import time
 import requests
 
 API_URL = os.getenv("BRAINDB_API_URL", "http://localhost:8000")
-CRON_INTERVAL = int(os.getenv("WIKI_CRON_INTERVAL", "120"))        # ~2m: cheap continuous scan; settling is enforced by the created_at freshness gate in _orphan_conditions(), not by this interval
-MAINTAIN_INTERVAL = int(os.getenv("WIKI_MAINTAIN_INTERVAL", "45"))  # one case / 45s
-WRITE_INTERVAL = int(os.getenv("WIKI_WRITE_INTERVAL", "60"))        # one wiki / 60s
-TICK = int(os.getenv("WIKI_SCHEDULER_TICK", "5"))
+INTERVAL = int(os.getenv("WIKI_INTERVAL", "60"))          # one cadence, like the watcher
+DRAIN_MAX = int(os.getenv("WIKI_DRAIN_MAX", "20"))        # safety bound on /write per tick
 AGENT_TIMEOUT = int(os.getenv("WIKI_AGENT_TIMEOUT", "600"))
 
 logging.basicConfig(
@@ -36,6 +31,8 @@ logging.basicConfig(
     stream=sys.stdout,
 )
 log = logging.getLogger("wiki-scheduler")
+
+_SUGGESTION_TYPES = {"create", "attach", "consolidate"}
 
 
 def wait_for_api(timeout: int = 90) -> bool:
@@ -62,44 +59,64 @@ def _post(path: str, timeout: int) -> dict | None:
     return None
 
 
+def _pending_kinds() -> tuple[bool, bool]:
+    """(has_triage, has_suggestion) from ONE cheap SQL-only read. On error,
+    return (False, False) so we never fire LLM calls on uncertain state."""
+    try:
+        r = requests.get(
+            f"{API_URL}/api/v1/wiki/jobs",
+            params={"status": "pending", "limit": 500},
+            timeout=15,
+        )
+        if r.status_code != 200:
+            log.warning("/jobs -> %s: %s", r.status_code, r.text[:200])
+            return (False, False)
+        jobs = r.json()
+    except (requests.RequestException, ValueError) as e:
+        log.warning("/jobs read error: %s", e)
+        return (False, False)
+    has_triage = any(j.get("job_type") == "triage" for j in jobs)
+    has_sugg = any(j.get("job_type") in _SUGGESTION_TYPES for j in jobs)
+    return (has_triage, has_sugg)
+
+
 def main() -> None:
     log.info("waiting for API at %s ...", API_URL)
     if not wait_for_api():
         log.error("API never came up; exiting")
         sys.exit(1)
-    log.info(
-        "wiki scheduler ready (cron=%ss maintain=%ss write=%ss)",
-        CRON_INTERVAL, MAINTAIN_INTERVAL, WRITE_INTERVAL,
-    )
-
-    next_cron = 0.0
-    next_maintain = 0.0
-    next_write = 0.0
+    log.info("wiki scheduler ready (single loop, interval=%ss)", INTERVAL)
 
     while True:
-        now = time.time()
         try:
-            if now >= next_cron:
-                res = _post("/api/v1/wiki/cron", timeout=60)
-                if res:
-                    log.info("cron: %s", res)
-                next_cron = now + CRON_INTERVAL
+            # 1. cron — cheap SQL, safe to run every tick.
+            res = _post("/api/v1/wiki/cron", timeout=60)
+            if res and res.get("triage_jobs_enqueued"):
+                log.info("cron: enqueued=%s pending_triage=%s",
+                         res.get("triage_jobs_enqueued"), res.get("pending_triage_total"))
 
-            if now >= next_maintain:
+            # 2. cheap gate — decide whether any LLM work is warranted.
+            has_triage, has_sugg = _pending_kinds()
+
+            # 3. one maintain case (C1) only if there is triage to do.
+            if has_triage:
                 res = _post("/api/v1/wiki/maintain", timeout=AGENT_TIMEOUT)
                 if res and res.get("claimed"):
                     log.info("maintain: %s", res.get("result"))
-                next_maintain = now + MAINTAIN_INTERVAL
 
-            if now >= next_write:
-                res = _post("/api/v1/wiki/write", timeout=AGENT_TIMEOUT)
-                if res and res.get("written"):
+            # 4. drain the write queue (bounded) only if suggestions exist.
+            if has_sugg:
+                for _ in range(DRAIN_MAX):
+                    res = _post("/api/v1/wiki/write", timeout=AGENT_TIMEOUT)
+                    if not res or not res.get("written"):
+                        break
                     log.info("write: wiki=%s mode=%s rev=%s",
                              res.get("wiki_id"), res.get("mode"), res.get("revision"))
-                next_write = now + WRITE_INTERVAL
+
+            # 5. nothing pending -> no LLM call happened this tick (free).
         except Exception as e:
             log.exception("loop error: %s", e)
-        time.sleep(TICK)
+        time.sleep(INTERVAL)
 
 
 if __name__ == "__main__":
