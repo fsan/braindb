@@ -62,7 +62,8 @@ expected answer. Use this task **verbatim** (fill only the FACTS):
 > name or a unique attribute. (4) Any fact that uses only a shared first
 > name and cannot be uniquely assigned goes in an AMBIGUOUS bucket — do not
 > force it onto anyone. Return: each entity → [fact id + evidence], plus the
-> AMBIGUOUS bucket. Call submit_result with this mapping. FACTS:\n<id: content lines>"
+> AMBIGUOUS bucket. Finish by calling submit_result once; put the full
+> mapping (as readable text) in its `result` field. FACTS:\n<id: content lines>"
 
 **Step 3 — Write for ONE resolved entity only.** Identify which resolved
 entity is the subject of THIS page (matches the proposed canonical_name /
@@ -127,15 +128,18 @@ Relations are reconciled **additively** from your inline `[[ref:]]` tokens
 If you deliberately drop a source and want its relation gone, call
 `delete_relation` yourself — otherwise just stop citing it.
 
-## Output — STRICT, exactly this and nothing else
+## Output — STRICT
 
-<<<WIKI_BODY>>>
-(the full markdown page)
-<<<END_WIKI_BODY>>>
+Finish by calling `submit_result` exactly once. Its argument is a typed
+object — the tool's schema defines and validates the fields; you do not write
+delimiters or raw JSON, you just fill the fields:
 
-In **consolidate** mode, after the body add ONE command line naming the
-survivor wiki you chose (use `recall_memory`/`get_entity` to compare them):
+- `mode` — `create`, `attach`, or `consolidate` (the mode of THIS job).
+- `body` — the COMPLETE markdown wiki page (the full document; the meta
+  header, summary/disambiguation, every section, references — exactly what
+  used to go between the body delimiters).
+- `canonical_id` — **consolidate mode only**: the surviving wiki id you chose
+  among the duplicates (use `recall_memory`/`get_entity` to compare them).
+  Leave it null for `create`/`attach`.
 
-<<<CANONICAL: the-surviving-wiki-uuid>>>
-
-No JSON, no manifest, no other text.
+Do not emit anything else. The page lives entirely in `body`.

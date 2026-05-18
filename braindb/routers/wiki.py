@@ -6,13 +6,13 @@ the Stage-2 `wiki_scheduler` sidecar. `/cron` and `/jobs` are pure SQL and
 non-destructive; `/maintain` and `/write` (later steps) drive the existing
 agent endpoint.
 """
-import json
 import logging
 from pathlib import Path
 
 from fastapi import APIRouter, Query
 
-from braindb.agent.agent import run_agent_query
+from braindb.agent.agent import run_typed, get_maintainer_agent, get_writer_agent
+from braindb.agent.schemas import MaintainerDecision, WikiWriteResult
 from braindb.db import get_conn
 from braindb.services.activity_log import log_activity
 from braindb.services import wiki_jobs
@@ -24,31 +24,6 @@ router = APIRouter(prefix="/api/v1/wiki", tags=["wiki"])
 _PROMPTS = Path(__file__).parent.parent / "agent" / "prompts"
 _MAINTAINER_PROMPT = (_PROMPTS / "wiki_maintainer_prompt.md").read_text(encoding="utf-8")
 _WRITER_PROMPT = (_PROMPTS / "wiki_writer_prompt.md").read_text(encoding="utf-8")
-
-
-def _between(text: str, start: str, end: str) -> str | None:
-    i = text.find(start)
-    j = text.find(end, i + len(start)) if i != -1 else -1
-    return text[i + len(start):j].strip() if i != -1 and j != -1 else None
-
-
-def _extract_json(text: str) -> dict | None:
-    """Pull the first balanced JSON object out of the agent's answer."""
-    start = text.find("{")
-    while start != -1:
-        depth = 0
-        for i in range(start, len(text)):
-            if text[i] == "{":
-                depth += 1
-            elif text[i] == "}":
-                depth -= 1
-                if depth == 0:
-                    try:
-                        return json.loads(text[start:i + 1])
-                    except json.JSONDecodeError:
-                        break
-        start = text.find("{", start + 1)
-    return None
 
 
 @router.post("/cron")
@@ -102,20 +77,21 @@ async def wiki_maintain():
         content=(orphan.get("content") or "")[:4000],
     )
     try:
-        agent_out = await run_agent_query(prompt, max_turns=30)
-        answer = agent_out.get("answer", "")
+        res = await run_typed(prompt, get_maintainer_agent(), max_turns=30)
     except Exception as e:
         logger.exception("maintainer agent failed")
         with get_conn() as conn:
             wiki_jobs.finish_job(conn, job_id, "failed", f"agent error: {e}"[:500])
         return {"claimed": 1, "job_id": job_id, "result": "failed", "reason": str(e)}
 
-    decision = _extract_json(answer)
-    if not decision or "action" not in decision:
+    if not isinstance(res, MaintainerDecision):
         with get_conn() as conn:
-            wiki_jobs.finish_job(conn, job_id, "failed", f"unparseable: {answer[:400]}")
-        return {"claimed": 1, "job_id": job_id, "result": "failed", "reason": "unparseable agent output"}
+            wiki_jobs.finish_job(conn, job_id, "failed", f"untyped output: {str(res)[:400]}")
+        return {"claimed": 1, "job_id": job_id, "result": "failed", "reason": "untyped agent output"}
 
+    # Schema-validated; expose as a dict so the action handlers below are
+    # unchanged.
+    decision = res.model_dump()
     action = decision.get("action")
     rationale = decision.get("rationale")
 
@@ -275,23 +251,21 @@ async def wiki_write():
     # Generous turns so the writer can recall_memory / view_tree / delegate a
     # subagent to research and verify before writing.
     try:
-        agent_out = await run_agent_query(prompt, max_turns=30)
-        answer = agent_out.get("answer", "")
+        res = await run_typed(prompt, get_writer_agent(), max_turns=30)
     except Exception as e:
         logger.exception("writer agent failed")
         with get_conn() as conn:
             disp = wiki_jobs.release_or_fail_jobs(conn, job_ids, f"agent error: {e}")
         return {"written": 0, "result": disp, "reason": str(e)}
 
-    # The LLM returns ONLY the body. Consolidate also emits a single command
-    # line `<<<CANONICAL: wiki_id>>>` (a command, not page content) naming the
-    # survivor it chose.
-    new_body = _between(answer, "<<<WIKI_BODY>>>", "<<<END_WIKI_BODY>>>")
-    if not new_body:
+    # Schema-validated typed output. `body` is the complete markdown page;
+    # consolidate also carries `canonical_id` (the survivor it chose).
+    if not isinstance(res, WikiWriteResult) or not (res.body or "").strip():
         with get_conn() as conn:
             disp = wiki_jobs.release_or_fail_jobs(
-                conn, job_ids, f"no WIKI_BODY block returned: {answer[:300]}")
+                conn, job_ids, f"no/invalid typed body: {str(res)[:300]}")
         return {"written": 0, "result": disp, "reason": "no body returned"}
+    new_body = res.body
 
     # 3. Persist (one transaction). No content gate — the LLM's body is
     #    authoritative; we only snapshot (reversible) and reconcile additively.
@@ -305,7 +279,7 @@ async def wiki_write():
                 keywords=kw)
             revision = 1
         elif mode == "consolidate":
-            canonical_id = (_between(answer, "<<<CANONICAL:", ">>>") or "").strip()
+            canonical_id = (res.canonical_id or "").strip()
             dupe_ids = {d["id"] for d in dupes}
             if canonical_id not in dupe_ids:
                 disp = wiki_jobs.release_or_fail_jobs(

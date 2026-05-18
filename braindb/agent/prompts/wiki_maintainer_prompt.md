@@ -83,16 +83,14 @@ writer stage does, and it will research further.
 
 ## Output — STRICT
 
-Call `submit_result` with ONE JSON object and nothing else:
+Finish by calling `submit_result` exactly once. Its argument is a typed
+object — the tool's schema defines and validates the fields; you just fill
+them (no raw JSON text, no prose):
 
-```
-{{"action": "attach|create|consolidate|skip|ambiguous",
-  "target_wiki_id": "<uuid of existing wiki, or null>",
-  "proposed_name": "<canonical name explicitly found in evidence, or null>",
-  "consolidate_wiki_ids": ["<uuid>", "<uuid>"],
-  "rationale": "<1-3 sentences: what you researched and why this decision>"}}
-```
-
-`attach` requires `target_wiki_id`. `create` requires `proposed_name` (must
-appear in the evidence). `consolidate` requires ≥2 `consolidate_wiki_ids`.
-`skip`/`ambiguous` need only `rationale`. Use `null` / `[]` for N/A. Valid JSON.
+- `action` — one of `attach`, `create`, `consolidate`, `skip`, `ambiguous`.
+- `target_wiki_id` — required for `attach` (the existing wiki's uuid); null otherwise.
+- `proposed_name` — required for `create` (a canonical name that appears in
+  the evidence); null otherwise.
+- `consolidate_wiki_ids` — required for `consolidate` (≥2 duplicate wiki
+  uuids); empty list otherwise.
+- `rationale` — 1-3 sentences: what you researched and why this decision.

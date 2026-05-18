@@ -35,6 +35,12 @@ from braindb.services.keyword_service import (
     sync_keywords_for_entity,
 )
 from braindb.services.search import fuzzy_search, preview, slice_content
+from braindb.agent.schemas import (
+    AgentAnswer,
+    MaintainerDecision,
+    SubagentResult,
+    WikiWriteResult,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -808,19 +814,20 @@ async def delegate_to_subagent(task: str) -> str:
     try:
         # Local imports to avoid circular dependency on agent.py
         from agents import Runner
-        from braindb.agent.agent import create_braindb_agent
+        from braindb.agent.agent import get_subagent
         from braindb.config import settings
 
         logger.info("Subagent starting: %s", task[:200])
-        subagent = create_braindb_agent()
+        subagent = get_subagent()
         result = await Runner.run(
             starting_agent=subagent,
             input=task,
             max_turns=settings.agent_subagent_max_turns,
         )
-        answer = str(result.final_output)
+        fo = result.final_output
+        text = fo.result if isinstance(fo, SubagentResult) else str(fo)
         logger.info("Subagent completed.")
-        return _truncate(answer)
+        return _truncate(text)
     except Exception as e:
         logger.exception("Subagent failed")
         return _err(f"subagent failed: {e}")
@@ -832,12 +839,39 @@ async def delegate_to_subagent(task: str) -> str:
 # FINAL TOOL — stops the loop                                            #
 # ====================================================================== #
 
-@function_tool
-@_verbose("submit_result")
-async def submit_result(answer: str) -> str:
-    """Submit the final answer to the query. Call this exactly once when you're done.
+# Convention (absolute): the run finishes ONLY by calling `submit_result`,
+# and its argument is ALWAYS a typed Pydantic model — never a loose string.
+# `@function_tool` turns the model into a strict JSON schema for the tool
+# arguments, so the LLM is constrained to emit valid structured output (it
+# cannot free-run and truncate). There is one typed variant per agent purpose;
+# every variant keeps the name "submit_result" so prompts and
+# `StopAtTools(["submit_result"])` stay generic. Each returns the validated
+# model unchanged; the agent's `output_type` makes the SDK keep it as the
+# typed final output (no str() coercion).
 
-    Args:
-        answer: The full response to send back to the caller.
-    """
-    return answer
+@function_tool(name_override="submit_result")
+@_verbose("submit_result")
+async def submit_answer(payload: AgentAnswer) -> AgentAnswer:
+    """Submit the final answer. Call this exactly once when you're done."""
+    return payload
+
+
+@function_tool(name_override="submit_result")
+@_verbose("submit_result")
+async def submit_maintainer(payload: MaintainerDecision) -> MaintainerDecision:
+    """Submit the maintainer decision. Call this exactly once when you're done."""
+    return payload
+
+
+@function_tool(name_override="submit_result")
+@_verbose("submit_result")
+async def submit_wiki(payload: WikiWriteResult) -> WikiWriteResult:
+    """Submit the finished wiki. Call this exactly once when you're done."""
+    return payload
+
+
+@function_tool(name_override="submit_result")
+@_verbose("submit_result")
+async def submit_subagent(payload: SubagentResult) -> SubagentResult:
+    """Submit the delegated task result. Call this exactly once when you're done."""
+    return payload

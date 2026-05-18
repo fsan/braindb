@@ -1,0 +1,56 @@
+"""
+Typed agent output contract.
+
+Convention (absolute): every agent/subagent finishes via the `submit_result`
+trick, and its payload is ALWAYS one of these Pydantic models — never a loose
+free string we scrape. `@function_tool` turns the model into a strict JSON
+schema for the tool arguments, so the LLM is constrained to emit valid
+structured output instead of free-running and truncating.
+
+These mirror the style of `braindb/schemas/` (the REST layer); they reuse the
+existing pydantic dependency — no new dependency, no new machinery.
+"""
+from typing import Literal
+
+from pydantic import BaseModel, Field
+
+
+class AgentAnswer(BaseModel):
+    """General recall/save answer (the public /agent/query endpoint).
+
+    The endpoint is general-purpose (Claude Code, arbitrary recall/save), so
+    the answer itself is necessarily natural language — but it is still
+    delivered through the typed `submit_result` trick, never as loose
+    top-level model output.
+    """
+    answer: str = Field(..., description="The full natural-language response to the caller.")
+
+
+class MaintainerDecision(BaseModel):
+    """The wiki maintainer's per-orphan decision (replaces _extract_json)."""
+    action: Literal["attach", "create", "consolidate", "skip", "ambiguous"]
+    target_wiki_id: str | None = Field(
+        None, description="attach: the existing wiki id to attach the orphan to.")
+    proposed_name: str | None = Field(
+        None, description="create: the canonical name for the new wiki.")
+    consolidate_wiki_ids: list[str] = Field(
+        default_factory=list,
+        description="consolidate: the duplicate wiki ids to merge.")
+    rationale: str = Field(..., description="One to three sentences justifying the action.")
+
+
+class WikiWriteResult(BaseModel):
+    """The wiki writer's full output. `body` is the complete markdown page —
+    a typed field of the schema, exactly like any other field (not loose
+    text, not delimiter-wrapped)."""
+    mode: Literal["create", "attach", "consolidate"]
+    canonical_id: str | None = Field(
+        None,
+        description="consolidate ONLY: the surviving wiki id chosen from the "
+                    "duplicates. Null for create/attach.")
+    body: str = Field(..., description="The complete markdown wiki page.")
+
+
+class SubagentResult(BaseModel):
+    """A delegated subagent's return (replaces the free-string subagent answer)."""
+    result: str = Field(..., description="The distilled result of the delegated task.")
