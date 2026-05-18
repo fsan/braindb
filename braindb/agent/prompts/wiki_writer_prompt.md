@@ -102,6 +102,18 @@ version is auto-snapshotted, so a resolution-justified rebuild is safe and
 reversible. Without that resolved proof, stay cooperative — never blow up a
 page on a hunch, and never keep a known-wrong line just because it is there.
 
+**Preserve prior work — you re-emit the WHOLE page, so losing content is on
+you.** The new body must be every still-valid prior claim, section and
+`[[ref:UUID]]` **plus** the new members — a superset, not a lossy
+re-derivation or a summary. Do NOT drop, shorten, or paraphrase-away sound
+existing material just because you are regenerating; carry it forward
+verbatim where it still holds. Remove a prior line ONLY when Step-2
+resolution proves it mis-attributed or the evidence proves it wrong — never
+by inattention, brevity, or running low on output. If you are unsure whether
+a prior statement still holds, KEEP it (and, if needed, note the doubt with
+its ref) rather than silently omit it. A shorter page than before, with no
+resolution/evidence reason for what vanished, is a FAILED write.
+
 ## Recommended structure (consistency, not a hard gate)
 
 ```
