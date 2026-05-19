@@ -13,7 +13,8 @@ claim carries an inline reference `[[ref:ENTITY_UUID]]` (optionally
   - create = write a fresh page for the subject
   - attach = the page exists; integrate the new members AND revise anything
     now wrong (see "You MUST revise" below)
-  - consolidate = merge the duplicate wikis below into one survivor
+  - consolidate = merge the numbered duplicate wikis below into one
+    survivor; you pick the survivor by its NUMBER (`canonical_no`)
 - canonical_name (proposed): %%CANONICAL%%
 - wiki_id: %%WIKI_ID%%
 
@@ -23,7 +24,7 @@ claim carries an inline reference `[[ref:ENTITY_UUID]]` (optionally
 ### Current wiki body (attach mode; empty otherwise)
 %%CURRENT_BODY%%
 
-### Duplicate wikis to consolidate (consolidate mode only)
+### Duplicate wikis to consolidate (consolidate mode only — NUMBERED; pick the survivor's number as `canonical_no`)
 %%DUPLICATES%%
 
 ## Mandatory order of work (do NOT skip or reorder)
@@ -150,8 +151,9 @@ delimiters or raw JSON, you just fill the fields:
 - `body` — the COMPLETE markdown wiki page (the full document; the meta
   header, summary/disambiguation, every section, references — exactly what
   used to go between the body delimiters).
-- `canonical_id` — **consolidate mode only**: the surviving wiki id you chose
-  among the duplicates (use `recall_memory`/`get_entity` to compare them).
-  Leave it null for `create`/`attach`.
+- `canonical_no` — **consolidate mode only**: the NUMBER of the surviving
+  wiki you chose, taken from the numbered "Duplicate wikis to consolidate"
+  list above (an integer, e.g. `1`). Never an id. Leave it null for
+  `create`/`attach`.
 
 Do not emit anything else. The page lives entirely in `body`.

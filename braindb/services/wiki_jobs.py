@@ -384,6 +384,21 @@ def fetch_wiki(conn, wiki_id: str) -> dict | None:
         return dict(row) if row else None
 
 
+def list_active_wikis(conn) -> list[dict]:
+    """All non-retired wikis as {id, canonical_name}, deterministically
+    ordered. Plumbing read (mirrors fetch_wiki / export_wikis SQL) — the
+    maintainer is shown this as a NUMBERED catalog so it references wikis by
+    number, never by uuid; the order here IS the numbering."""
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(
+            """SELECT e.id::text AS id, w.canonical_name
+               FROM entities e JOIN wikis_ext w ON w.entity_id = e.id
+               WHERE e.entity_type = 'wiki' AND w.retired_at IS NULL
+               ORDER BY e.importance DESC, e.created_at"""
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+
 def release_or_fail_jobs(conn, job_ids: list[str], last_error: str,
                          max_attempts: int = 3) -> str:
     """On a gate failure: return jobs to 'pending' for retry, or 'failed' once

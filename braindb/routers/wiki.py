@@ -65,16 +65,27 @@ async def wiki_maintain():
                                  "already covered — absorbed by a wiki")
             return {"claimed": 1, "job_id": job_id, "result": "skipped_stale"}
 
+        # Catalog of existing wikis the model will reference BY NUMBER (never
+        # by uuid). This in-request list IS the numbering used to resolve the
+        # model's chosen number(s) back to ids below.
+        cat = wiki_jobs.list_active_wikis(conn)
+
     # 2. One agent call. The prompt directs it to RESEARCH the neighbourhood
     #    with its own tools (recall_memory / view_tree / delegate_to_subagent)
     #    before deciding — we give the seed, the LLM gathers the context.
     #    Generous turns so it can actually investigate / delegate.
+    catalog_txt = (
+        "\n".join(f"{i}. {w['canonical_name']}" for i, w in enumerate(cat, 1))
+        or "(no existing wikis yet — attach/consolidate are impossible; "
+           "use create/skip/ambiguous)"
+    )
     prompt = _MAINTAINER_PROMPT.format(
         entity_id=orphan_id,
         entity_type=orphan["entity_type"],
         keywords=orphan.get("keywords") or [],
         summary=orphan.get("summary"),
         content=(orphan.get("content") or "")[:4000],
+        wiki_catalog=catalog_txt,
     )
     try:
         res = await run_typed(prompt, get_maintainer_agent(), max_turns=30)
@@ -106,10 +117,15 @@ async def wiki_maintain():
                 outcome = {"action": action}
 
             elif action == "attach":
-                target = decision.get("target_wiki_id")
+                no = decision.get("target_wiki_no")
+                target = (cat[no - 1]["id"]
+                          if isinstance(no, int) and 1 <= no <= len(cat)
+                          else None)
                 if not target or not _is_wiki(conn, target):
-                    wiki_jobs.finish_job(conn, job_id, "failed", f"invalid target_wiki_id {target}")
-                    outcome = {"action": "attach", "error": "invalid target_wiki_id"}
+                    wiki_jobs.finish_job(
+                        conn, job_id, "failed",
+                        f"attach: target_wiki_no {no!r} not a valid catalog number (1..{len(cat)})")
+                    outcome = {"action": "attach", "error": "invalid target_wiki_no"}
                 else:
                     key = wiki_jobs.suggestion_dedupe_key("attach", target, [orphan_id], [])
                     sid = wiki_jobs.insert_suggestion(
@@ -134,10 +150,15 @@ async def wiki_maintain():
                     outcome = {"action": "create", "suggestion_id": sid, "proposed_name": name}
 
             elif action == "consolidate":
-                wiki_ids = [str(w) for w in (decision.get("consolidate_wiki_ids") or [])]
+                nos = decision.get("consolidate_nos") or []
+                ids = [cat[n - 1]["id"] for n in nos
+                       if isinstance(n, int) and 1 <= n <= len(cat)]
+                wiki_ids = list(dict.fromkeys(ids))  # dedupe, keep order
                 if len(wiki_ids) < 2:
-                    wiki_jobs.finish_job(conn, job_id, "failed", "consolidate needs >=2 wiki ids")
-                    outcome = {"action": "consolidate", "error": "need >=2 wiki ids"}
+                    wiki_jobs.finish_job(
+                        conn, job_id, "failed",
+                        f"consolidate: need >=2 valid catalog numbers, got {nos!r} (1..{len(cat)})")
+                    outcome = {"action": "consolidate", "error": "need >=2 valid catalog numbers"}
                 else:
                     key = wiki_jobs.suggestion_dedupe_key("consolidate", None, [], wiki_ids)
                     sid = wiki_jobs.insert_suggestion(
@@ -232,10 +253,13 @@ async def wiki_write():
     def _dupes_block(ds: list[dict]) -> str:
         if not ds:
             return "(n/a)"
+        # Numbered; the writer picks the survivor by NUMBER (canonical_no),
+        # never by id. This order IS the numbering resolved below.
         return "\n".join(
-            f"- wiki_id: {d['id']}\n  canonical_name: {d['canonical_name']}\n"
-            f"  importance: {d['importance']}  revision: {d['revision']}\n"
-            f"  body:\n{(d['content'] or '')[:3000]}" for d in ds
+            f"{i}. {d['canonical_name']} "
+            f"(importance: {d['importance']}  revision: {d['revision']})\n"
+            f"  body:\n{(d['content'] or '')[:3000]}"
+            for i, d in enumerate(ds, 1)
         )
 
     # 2. One focused agent call.
@@ -279,14 +303,14 @@ async def wiki_write():
                 keywords=kw)
             revision = 1
         elif mode == "consolidate":
-            canonical_id = (res.canonical_id or "").strip()
-            dupe_ids = {d["id"] for d in dupes}
-            if canonical_id not in dupe_ids:
+            no = res.canonical_no
+            if not (isinstance(no, int) and 1 <= no <= len(dupes)):
                 disp = wiki_jobs.release_or_fail_jobs(
                     conn, job_ids,
-                    f"<<<CANONICAL>>> {canonical_id!r} not among the duplicates")
+                    f"canonical_no {no!r} not a valid duplicates number (1..{len(dupes)})")
                 return {"written": 0, "result": disp,
-                        "reason": "invalid or missing CANONICAL signal"}
+                        "reason": "invalid canonical_no"}
+            canonical_id = dupes[no - 1]["id"]
             wiki_id = canonical_id
             for d in dupes:
                 wiki_jobs.snapshot_revision(

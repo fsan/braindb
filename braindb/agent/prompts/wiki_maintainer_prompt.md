@@ -4,16 +4,9 @@ A "wiki" is a synthesised, human-readable page (entity_type = `wiki`) about ONE
 real-world subject, built from the fact/thought/source entities that are
 genuinely about that subject.
 
-## The seed (a starting point — NOT the whole picture)
-
-- entity_id: `{entity_id}`
-- entity_type: `{entity_type}`
-- keywords: {keywords}
-- summary: {summary}
-- content:
-{content}
-
-This single entity is rarely enough to decide correctly. You MUST investigate
+Your case (THE SEED) and the numbered WIKIS catalog are at the **END** of
+this prompt. Read the static rules here first, then act on the data there.
+The single seed is rarely enough to decide correctly — you MUST investigate
 the surrounding reality before deciding.
 
 ## Research FIRST with the powerful tools (this is mandatory)
@@ -32,9 +25,10 @@ Tool priority — use them in this order, do not skip to the bottom:
    obvious **name variants/aliases**: given/family-name swaps and orderings,
    spelling variants, and the BROAD subject behind a NARROW fact (a fact
    about "X's LinkedIn" / "X's divestment from Y" is about **X**, not a new
-   subject). The single required output of this step is: **does a `wiki`
-   already exist for this subject (under any variant)?** You may not choose
-   `create` until you have actually looked and that answer is "no".
+   subject). The single required output of this step is: **does this subject
+   already have a wiki in the WIKIS catalog at the end (under any variant)?**
+   You may not choose `create` until you have actually looked and that
+   answer is "no".
 2. **`delegate_to_subagent`** — when identity/scope is non-trivial (e.g. "are
    these two 'Dimitris' facts the same person?"), delegate a focused
    investigation: tell the subagent exactly what to resolve and to return a
@@ -70,6 +64,15 @@ Tool priority — use them in this order, do not skip to the bottom:
   concept. If the seed is only that, with no real fact/thought/source behind
   it → **skip**.
 
+## Referencing existing wikis — BY NUMBER ONLY
+
+Every existing wiki is listed in the numbered **WIKIS catalog** at the end of
+this prompt. To `attach` or `consolidate`, you reference wikis **solely by
+their catalog number** — never by id, name, or a guessed value. You may only
+attach/consolidate to wikis that appear in that numbered catalog. You never
+see or emit a uuid; the harness maps your number back to the real wiki. If
+the subject is not in the catalog, you cannot attach/consolidate to it.
+
 ## Decide ONE action for THIS seed — STRICT PRECEDENCE, in this order
 
 Evaluate top to bottom and take the FIRST that applies. `create` is the last
@@ -81,27 +84,20 @@ honour it.
 2. **ambiguous** — recall cannot disambiguate which real subject this is
    (e.g. a bare shared first name). Refusing to mint a confident page is the
    correct, honest outcome; say what is unresolved in `rationale`.
-3. **consolidate** — recall surfaced ≥2 existing wikis that are the SAME
-   real subject (incl. name variants/over-narrow fragment pages of one
-   subject). List their ids. Do NOT re-propose a pair already linked by
-   `not_duplicate` / `duplicate_of`. This is the primary heal action — if
-   you see duplicates while researching, you MUST propose this.
-4. **attach** — an existing wiki already covers this subject (under any
-   name variant), or the seed is a narrow fact about an already-wikied
-   broad subject. A narrow fact about an existing subject is ALWAYS an
-   attach, never a new page.
-   **Grounding the id (hard rule — do NOT skip):** `target_wiki_id` MUST be
-   an id you literally saw in THIS session's tool output — from
-   `recall_memory` or from `list_entities(entity_type='wiki')` — and that
-   you then confirmed by calling `get_entity(<that id>)` and seeing
-   `entity_type` = `wiki`. NEVER write a UUID from memory, pattern, or
-   guess; an unverified id is worthless and will be rejected. If you
-   believe a wiki exists but cannot produce a tool-seen, get_entity-verified
-   wiki id for it, you may NOT choose `attach` — continue down to step 5.
-5. **create** — ONLY if steps 1-4 do not apply: recall genuinely shows no
-   existing wiki for this subject under any variant, AND the evidence
-   supports a clear, explicitly-named subject and scope. Give the canonical
-   name (must appear in the evidence).
+3. **consolidate** — the catalog contains ≥2 wikis that are the SAME real
+   subject (incl. name variants / over-narrow fragment pages of one
+   subject). Put their catalog **numbers** in `consolidate_nos` (≥2). Do NOT
+   re-propose a pair already linked by `not_duplicate` / `duplicate_of`.
+   This is the primary heal action — if you see duplicates in the catalog
+   while researching, you MUST propose this.
+4. **attach** — a catalog wiki already covers this subject (under any name
+   variant), or the seed is a narrow fact about an already-wikied broad
+   subject. Put that wiki's catalog **number** in `target_wiki_no`. A narrow
+   fact about an existing subject is ALWAYS an attach, never a new page.
+5. **create** — ONLY if steps 1-4 do not apply: recall + the catalog
+   genuinely show no existing wiki for this subject under any variant, AND
+   the evidence supports a clear, explicitly-named subject and scope. Give
+   the canonical name (must appear in the evidence).
 
 You only produce the suggestion. You do NOT create wikis/relations here — the
 writer stage does, and it will research further.
@@ -113,11 +109,27 @@ object — the tool's schema defines and validates the fields; you just fill
 them (no raw JSON text, no prose):
 
 - `action` — one of `attach`, `create`, `consolidate`, `skip`, `ambiguous`.
-- `target_wiki_id` — required for `attach` (the existing wiki's uuid); null otherwise.
+- `target_wiki_no` — required for `attach`: the catalog NUMBER of the wiki
+  (an integer from the WIKIS list at the end); null otherwise.
 - `proposed_name` — required for `create` (a canonical name that appears in
   the evidence); null otherwise.
-- `consolidate_wiki_ids` — required for `consolidate` (≥2 duplicate wiki
-  uuids); empty list otherwise.
-- `rationale` — 1-3 sentences: name the existing wiki(s) recall surfaced for
-  this subject (or state recall found none), and why attach/consolidate was
+- `consolidate_nos` — required for `consolidate`: a list of ≥2 catalog
+  NUMBERS (integers from the WIKIS list); empty otherwise.
+- `rationale` — 1-3 sentences: name the catalog wiki(s) you matched this
+  subject to (or state the catalog has none), and why attach/consolidate was
   or was not chosen. This makes the decision auditable.
+
+---
+
+## THE SEED (your one case)
+
+- entity_id: `{entity_id}`
+- entity_type: `{entity_type}`
+- keywords: {keywords}
+- summary: {summary}
+- content:
+{content}
+
+## WIKIS catalog (existing wikis — reference these BY NUMBER)
+
+{wiki_catalog}

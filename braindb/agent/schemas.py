@@ -27,15 +27,23 @@ class AgentAnswer(BaseModel):
 
 
 class MaintainerDecision(BaseModel):
-    """The wiki maintainer's per-orphan decision (replaces _extract_json)."""
+    """The wiki maintainer's per-orphan decision. Existing wikis are
+    referenced by their CATALOG NUMBER (the numbered list at the end of the
+    prompt), never by uuid — the harness maps number->id deterministically.
+    """
     action: Literal["attach", "create", "consolidate", "skip", "ambiguous"]
-    target_wiki_id: str | None = Field(
-        None, description="attach: the existing wiki id to attach the orphan to.")
+    target_wiki_no: int | None = Field(
+        None,
+        description="attach: the CATALOG NUMBER of the existing wiki to "
+                    "attach the orphan to (from the numbered WIKIS list at "
+                    "the end of the prompt). Null otherwise.")
     proposed_name: str | None = Field(
         None, description="create: the canonical name for the new wiki.")
-    consolidate_wiki_ids: list[str] = Field(
+    consolidate_nos: list[int] = Field(
         default_factory=list,
-        description="consolidate: the duplicate wiki ids to merge.")
+        description="consolidate: the CATALOG NUMBERS (>=2) of the duplicate "
+                    "wikis to merge (from the numbered WIKIS list). Empty "
+                    "otherwise.")
     rationale: str = Field(..., description="One to three sentences justifying the action.")
 
 
@@ -44,10 +52,11 @@ class WikiWriteResult(BaseModel):
     a typed field of the schema, exactly like any other field (not loose
     text, not delimiter-wrapped)."""
     mode: Literal["create", "attach", "consolidate"]
-    canonical_id: str | None = Field(
+    canonical_no: int | None = Field(
         None,
-        description="consolidate ONLY: the surviving wiki id chosen from the "
-                    "duplicates. Null for create/attach.")
+        description="consolidate ONLY: the NUMBER of the surviving wiki "
+                    "chosen from the numbered duplicates list in the prompt "
+                    "(never an id). Null for create/attach.")
     body: str = Field(..., description="The complete markdown wiki page.")
 
 
