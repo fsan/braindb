@@ -29,6 +29,24 @@ ACTIVE_STATUSES = ("pending", "assigned")
 # access, which would leave recalled entities perpetually "fresh".
 FRESHNESS_MINUTES = int(os.getenv("WIKI_FRESHNESS_MINUTES", "30"))
 
+# Stale-lease (visibility-timeout) for claimed jobs. A job sits in `assigned`
+# only while a worker is actively running it; if that worker never returns
+# (api restart mid-run, agent timeout) the row would wedge forever. Instead
+# of a reaper/cycle, an `assigned` job whose lease expired is simply
+# claimable again at the EXISTING claim step. 20 min is comfortably above
+# the longest legit run (AGENT_TIMEOUT ~10 min), so a still-running job is
+# never reclaimed. `attempts`+max_attempts already bound repeated failures.
+ASSIGNED_LEASE_MIN = int(os.getenv("WIKI_ASSIGNED_LEASE_MIN", "20"))
+
+
+def _claimable(alias: str = "") -> str:
+    """SQL predicate: a job is claimable if pending, OR assigned but its
+    lease expired. Reused verbatim at every claim site (DRY). `alias` is the
+    table alias when the query qualifies columns (e.g. 'j')."""
+    p = f"{alias}." if alias else ""
+    return (f"({p}status = 'pending' OR ({p}status = 'assigned' "
+            f"AND {p}assigned_at < now() - make_interval(mins => {ASSIGNED_LEASE_MIN})))")
+
 # Inline reference token: [[ref:UUID]] or [[ref:UUID|display text]]
 REF_RE = re.compile(
     r"\[\[ref:([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
@@ -110,8 +128,8 @@ def claim_jobs(conn, job_ids: list[str]) -> int:
         return 0
     with conn.cursor() as cur:
         cur.execute(
-            """UPDATE wiki_job SET status='assigned', assigned_at=now(), attempts=attempts+1
-               WHERE id = ANY(%s::uuid[]) AND status='pending'
+            f"""UPDATE wiki_job SET status='assigned', assigned_at=now(), attempts=attempts+1
+               WHERE id = ANY(%s::uuid[]) AND {_claimable()}
                  AND id IN (SELECT id FROM wiki_job WHERE id = ANY(%s::uuid[])
                             FOR UPDATE SKIP LOCKED)""",
             (job_ids, job_ids),
@@ -235,13 +253,13 @@ def claim_one_triage(conn) -> dict | None:
     """
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(
-            """
+            f"""
             UPDATE wiki_job
                SET status = 'assigned', assigned_at = now(), attempts = attempts + 1
              WHERE id = (
                  SELECT j.id FROM wiki_job j
                   JOIN entities e ON e.id = j.entity_ids[1]
-                  WHERE j.status = 'pending' AND j.job_type = 'triage'
+                  WHERE {_claimable("j")} AND j.job_type = 'triage'
                   ORDER BY e.importance DESC, j.created_at
                   FOR UPDATE OF j SKIP LOCKED
                   LIMIT 1
@@ -324,10 +342,10 @@ def next_write_bucket(conn) -> dict | None:
     """
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(
-            """SELECT id, job_type, target_wiki_id, entity_ids::text[] AS entity_ids,
+            f"""SELECT id, job_type, target_wiki_id, entity_ids::text[] AS entity_ids,
                       proposed_name, rationale, batch_id
                FROM wiki_job
-               WHERE status='pending' AND job_type IN ('create','attach','consolidate')
+               WHERE {_claimable()} AND job_type IN ('create','attach','consolidate')
                ORDER BY CASE job_type WHEN 'consolidate' THEN 0
                                       WHEN 'attach'      THEN 1
                                       ELSE 2 END,
@@ -347,9 +365,9 @@ def next_write_bucket(conn) -> dict | None:
                     "target_wiki_id": None, "proposed_name": None,
                     "wiki_ids": seed["entity_ids"]}
         cur.execute(
-            """SELECT id, entity_ids::text[] AS entity_ids
+            f"""SELECT id, entity_ids::text[] AS entity_ids
                FROM wiki_job
-               WHERE status='pending' AND job_type='attach'
+               WHERE {_claimable()} AND job_type='attach'
                  AND target_wiki_id = %s
                ORDER BY created_at""",
             (seed["target_wiki_id"],),
