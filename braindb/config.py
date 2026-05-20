@@ -95,16 +95,29 @@ class Settings(BaseSettings):
     # Agent (LiteLLM — provider selected via llm_profile)
     llm_profile: str = "deepinfra"
     agent_model: str = ""          # blank = use profile's default model
-    agent_max_turns: int = 15
+    # Bumped 15 → 20 after live observation on Qwen 27B AWQ-INT4 (vLLM):
+    # deep-research-style runs commonly need >15 tool turns to land
+    # `final_answer`. 20 gives breathing room; finishes-fast providers
+    # (deepinfra/Gemma) are unaffected because they don't get close. Lower
+    # than ~15 will regress Qwen behaviour. Callers that need a different
+    # value (wiki maintainer/writer pass 30; ingest watcher passes 30/40)
+    # still do so explicitly via `max_turns=` overrides.
+    agent_max_turns: int = 20
     agent_subagent_max_turns: int = 30
     agent_verbose: bool = False
 
-    # Runtime "you have N turns left, finalise" nudge (Layer 3 of Stage C).
-    # When ≤ this many LLM-call turns remain before `max_turns` is exhausted,
-    # `CountdownHooks` injects ONE synthetic user message into the running
-    # conversation reminding the model to call `final_answer`. One nudge per
-    # run, never spammed. Set to 0 to disable the nudge entirely.
-    agent_countdown_threshold: int = 5
+    # Runtime "start wrapping up, you have N turns left" nudge (Layer 3 of
+    # Stage C). When ≤ this many LLM-call turns remain before `max_turns`
+    # is exhausted, `CountdownHooks` injects ONE synthetic user message
+    # into the running conversation reminding the model to start
+    # concluding research and call `final_answer`. The message tone is
+    # context-aware: soft "start wrapping up" when `max_turns` is generous
+    # (> 5), hard "call final_answer NOW" when the budget is tight (≤ 5,
+    # which naturally covers the Layer 4 retry path with `max_turns=3`).
+    # One nudge per run, never spammed. Set to 0 to disable entirely.
+    # Bumped 5 → 8 so the nudge fires earlier and the model has room to
+    # wrap up cleanly instead of slamming into the wall at the last turn.
+    agent_countdown_threshold: int = 8
 
     # Retry-with-correction when a run ends without `final_answer` (Layer 4
     # of Stage C). If the model emits prose instead of calling the typed

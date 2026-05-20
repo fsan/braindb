@@ -108,15 +108,45 @@ class CountdownHooks(RunHooks):
         )
 
     def _format_nudge(self, remaining: int) -> str:
-        """The text the model sees. Kept short and imperative — weak models
-        respond best to a single, unambiguous instruction."""
+        """The text the model sees. Tone is chosen by `self.max_turns`:
+
+        - SOFT (max_turns > 5): "start wrapping up, you have N left".
+          Used when the budget is generous (the new default of 20 with
+          threshold 8 fires the nudge at turn 12, with 8 turns still to
+          spend). Deep-research models like Qwen do better when given
+          a "begin concluding" signal rather than a hard stop — they
+          can do one or two focused gap-filling calls before
+          `final_answer` instead of slamming tools shut mid-thread.
+
+        - HARD (max_turns ≤ 5): "call `final_answer` NOW". Used when
+          the budget is tight — most notably the Layer 4 retry path
+          (`max_turns=3`), where the retry is explicitly a "you forgot
+          to finalise, please call the tool now" correction. The
+          model gets the unambiguous instruction without ambiguity
+          about wrapping up vs investigating further.
+
+        Why pick the tone from `max_turns` rather than an explicit
+        constructor flag: the retry call site already passes its own
+        `max_turns=settings.agent_retry_max_turns` (3) and the main
+        run passes the general `max_turns` (20). The two contexts
+        differ exactly along the budget axis, so we get the right
+        tone with no new constructor surface and no caller changes.
+        """
         # Clamp to non-negative for readability; if remaining went past 0
         # we still want a coherent message even though the SDK would
         # raise MaxTurnsExceeded shortly.
         remaining = max(0, remaining)
+        plural = "s" if remaining != 1 else ""
+        if self.max_turns <= 5:
+            return (
+                f"You have {remaining} tool call{plural} left. "
+                f"Call `{self.tool_name}` with your answer now. "
+                f"Do not start new research."
+            )
         return (
-            f"You have {remaining} tool call{'s' if remaining != 1 else ''} "
-            f"left before the run is forced to end. Finalise NOW by calling "
-            f"`{self.tool_name}` with your answer. Do not start any new "
-            f"research; deliver what you already know via `{self.tool_name}`."
+            f"Heads up: you have {remaining} tool call{plural} left "
+            f"in this run. Start wrapping up — synthesise what you "
+            f"have already gathered and prepare to call "
+            f"`{self.tool_name}`. Focused gap-filling is fine; avoid "
+            f"opening brand-new lines of investigation."
         )

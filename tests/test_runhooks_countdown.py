@@ -165,3 +165,96 @@ async def test_hook_exception_does_not_kill_run() -> None:
             await hooks.on_llm_start(ctx, agent, sp, items)
         except Exception as e:  # noqa: BLE001 — that's the point
             pytest.fail(f"on_llm_start let an exception escape: {e!r}")
+
+
+# ------------------------------------------------------------------ #
+# Tone-adaptive nudge wording (soft vs hard based on max_turns)        #
+# ------------------------------------------------------------------ #
+#
+# After tuning the countdown to be friendlier on deep-research models
+# (Qwen), the nudge message picks its tone from `max_turns` at
+# construction time:
+#   - max_turns > 5  → SOFT tone ("start wrapping up, you have N
+#     left"). Used for the general /agent/query path with the default
+#     max_turns=20.
+#   - max_turns ≤ 5  → HARD tone ("call `final_answer` with your
+#     answer now"). Used for the Layer 4 retry path with
+#     max_turns=3, where the run is explicitly a single-purpose
+#     "you forgot to finalise, call the tool now" correction.
+#
+# The tone is picked from max_turns alone (no new constructor flag)
+# so call sites don't change.
+
+
+@pytest.mark.asyncio
+async def test_soft_tone_when_max_turns_above_threshold() -> None:
+    """With a generous budget (max_turns=20, threshold=8), the nudge
+    fires at turn 12 (remaining=8) and uses the soft "wrapping up"
+    phrasing — NOT the hard "now" phrasing. Deep-research models
+    should be allowed a few focused gap-filling calls before
+    final_answer rather than forced to stop mid-thread."""
+    max_turns, threshold = 20, 8
+    hooks = CountdownHooks(max_turns=max_turns, threshold=threshold, tool_name=EXPECTED_TOOL_NAME)
+    items: list = []
+    # Burn turns up to the threshold; the next call crosses it.
+    for _ in range(max_turns - threshold):
+        ctx, agent, sp, _ = _make_args(items)
+        await hooks.on_llm_start(ctx, agent, sp, items)
+    assert len(items) == 1, f"expected exactly 1 nudge appended, got {items!r}"
+    nudge_text = items[0]["content"]
+    # Soft tone hallmarks
+    assert "wrapping up" in nudge_text.lower(), (
+        f"soft tone must contain 'wrapping up'; got {nudge_text!r}"
+    )
+    assert "gap-filling" in nudge_text.lower(), (
+        f"soft tone must mention 'gap-filling' (the explicit allowance "
+        f"for focused investigation); got {nudge_text!r}"
+    )
+    assert EXPECTED_TOOL_NAME in nudge_text
+    # Hard-tone exclusivity: the soft message must NOT include the
+    # imperative "with your answer now" phrase from the hard message.
+    assert "with your answer now" not in nudge_text.lower(), (
+        f"soft tone must not contain hard-tone phrase; got {nudge_text!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_hard_tone_when_max_turns_at_retry_budget() -> None:
+    """With a tight budget (max_turns=3, the Layer 4 retry value), the
+    nudge fires immediately on turn 1 (since remaining drops to ≤
+    threshold right away) and uses the HARD phrasing — the retry
+    context is explicitly "you forgot to finalise, call the tool
+    now"; no time for soft wrapping-up framing."""
+    hooks = CountdownHooks(max_turns=3, threshold=8, tool_name=EXPECTED_TOOL_NAME)
+    items: list = []
+    ctx, agent, sp, _ = _make_args(items)
+    await hooks.on_llm_start(ctx, agent, sp, items)
+    assert len(items) == 1, f"expected exactly 1 nudge; got {items!r}"
+    nudge_text = items[0]["content"]
+    # Hard tone hallmarks
+    assert "with your answer now" in nudge_text.lower(), (
+        f"hard tone must contain 'with your answer now'; got {nudge_text!r}"
+    )
+    assert EXPECTED_TOOL_NAME in nudge_text
+    # Soft-tone exclusivity: the hard message must NOT include the
+    # "wrapping up" softening phrase.
+    assert "wrapping up" not in nudge_text.lower(), (
+        f"hard tone must not contain soft-tone phrase; got {nudge_text!r}"
+    )
+
+
+def test_remaining_plural_grammar() -> None:
+    """The nudge text must use 'tool call' (singular) when remaining=1
+    and 'tool calls' (plural) for any other count. Tested by directly
+    calling the private `_format_nudge` so we don't have to rig up an
+    on_llm_start sequence per count."""
+    # Soft-tone hook (max_turns > 5)
+    hooks_soft = CountdownHooks(max_turns=20, threshold=8, tool_name=EXPECTED_TOOL_NAME)
+    assert "1 tool call left" in hooks_soft._format_nudge(1)  # type: ignore[attr-defined]
+    assert "2 tool calls left" in hooks_soft._format_nudge(2)  # type: ignore[attr-defined]
+    assert "8 tool calls left" in hooks_soft._format_nudge(8)  # type: ignore[attr-defined]
+
+    # Hard-tone hook (max_turns <= 5)
+    hooks_hard = CountdownHooks(max_turns=3, threshold=8, tool_name=EXPECTED_TOOL_NAME)
+    assert "1 tool call left" in hooks_hard._format_nudge(1)  # type: ignore[attr-defined]
+    assert "2 tool calls left" in hooks_hard._format_nudge(2)  # type: ignore[attr-defined]
