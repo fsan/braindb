@@ -180,6 +180,34 @@ Delegation is 1 level deep — subagents cannot spawn more subagents.
 
 ---
 
+## File ingestion — automatic, no agent call needed
+
+If the user wants a local file (article, transcript, note, document) ingested into BrainDB, **don't ask the agent to do it**. Instead, copy the file into the repo's `data/sources/` directory and the system handles the rest:
+
+1. The `braindb_watcher` sidecar polls `data/sources/` every ~7 seconds.
+2. New files are auto-ingested as `datasource` entities (content + hash + word count).
+3. The watcher then runs an agent-driven extraction pass that creates one or more `fact` entities derived from the document and links them back via `derived_from` relations.
+4. On success the file is moved to `data/sources/ingested/`; on failure to `data/sources/failed/` with a sidecar `.error.txt`.
+
+What this means for you (Claude) and the user:
+
+- **Tell the user**: "Just drop the file into `data/sources/` on the BrainDB repo. The watcher will pick it up within a few seconds and you'll see the facts appear in recall a minute or two later."
+- **Do not** issue an `/agent/query` like `"Save this file..."` with the file contents pasted into the prompt — that bloats the LLM context and bypasses the proper extraction pipeline. The watcher path produces structured facts + `derived_from` relations + keyword auto-tagging; pasting bypasses all of it.
+- **Watch progress** if you want to confirm completion:
+
+```bash
+docker logs braindb_watcher -f
+```
+
+You'll see `ingested NEW: <filename> -> <id> words=N` then later `extraction complete for <id>: N facts total`. After that the new facts surface naturally in `/agent/query` recall — no extra steps.
+
+Edge cases:
+- Very large files are chunked automatically; extraction takes proportionally longer (typically 60-180 seconds per chunk on local Qwen, faster on deepinfra).
+- If a file ends up in `data/sources/failed/`, read the sidecar `.error.txt` next to it to see what went wrong.
+- The watcher dedupes by file content hash, so re-dropping the same file won't re-extract.
+
+---
+
 ## Verbose mode — watch the agent work in real time
 
 Set `AGENT_VERBOSE=true` in the server's `.env` (default is `false`). When enabled, every tool call the agent makes is logged to stdout with args and result preview. Watch it live:
