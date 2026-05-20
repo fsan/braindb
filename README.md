@@ -169,19 +169,20 @@ curl -X POST http://localhost:8000/api/v1/agent/query \
   -H "Content-Type: application/json" \
   -d '{"query":"What do you know about the user role and recent projects?"}'
 
-# {"answer": "The user is ...", "max_turns": 15}
+# {"answer": "The user is ...", "max_turns": 20}
 ```
 
 The agent has 21 tools — every single BrainDB endpoint plus `delegate_to_subagent` (which spawns a fresh agent in its own context for focused deep work) and `final_answer` (which ends the loop with a validated typed payload).
 
 **LLM provider — pluggable via `.env`**:
 
-`LLM_PROFILE` selects the backend. Profiles are defined in [braindb/config.py](braindb/config.py) (`_LLM_PROFILES`) — currently `deepinfra` (default, model `google/gemma-4-31B-it`) and `nim` (NVIDIA NIM, model `google/gemma-4-31b-it`). Each profile is a model-prefix + env-var pair; adding a new one is a dict entry.
+`LLM_PROFILE` selects the backend. Profiles are defined in [braindb/config.py](braindb/config.py) (`_LLM_PROFILES`) — currently `deepinfra` (default, model `google/gemma-4-31B-it`), `nim` (NVIDIA NIM, model `google/gemma-4-31b-it`), `vllm_workstation` (local vLLM, Gemma AWQ-4bit), and `vllm_workstation_qwen` (local vLLM, Qwen 27B AWQ-INT4). Each profile is a model-prefix + env-var pair; adding a new one is a dict entry.
 
 ```
-LLM_PROFILE=deepinfra         # or nim — default is deepinfra
+LLM_PROFILE=deepinfra         # or nim / vllm_workstation / vllm_workstation_qwen
 DEEPINFRA_API_KEY=...         # required if profile=deepinfra (https://deepinfra.com/)
 NVIDIA_NIM_API_KEY=...        # required if profile=nim (https://build.nvidia.com/)
+VLLM_API_KEY=...              # optional, only if local vLLM is started with --api-key
 AGENT_MODEL=                  # optional: override the profile's default model
 ```
 

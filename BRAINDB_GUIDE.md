@@ -341,12 +341,11 @@ curl -X POST http://localhost:8000/api/v1/entities/datasources/ingest \
 ```bash
 curl -X POST http://localhost:8000/api/v1/agent/query \
   -H "Content-Type: application/json" \
-  -d '{
-    "query": "What do you know about the user role and recent projects?",
-    "max_turns": 15
-  }'
-# {"answer": "The user is ...", "max_turns": 15}
+  -d '{"query": "What do you know about the user role and recent projects?"}'
+# {"answer": "The user is ...", "max_turns": 20}
 ```
+
+(`max_turns` is optional; the default — currently 20 — is used when omitted.)
 
 **Save via the agent**:
 ```bash
