@@ -12,8 +12,12 @@ understanding must go through the sophisticated retrieval, never a flat SQL
 `SELECT`.
 
 1. **`POST /api/v1/memory/context`** (multi-query) — the default for ALL
-   recall, discovery, disambiguation, "what do we know about X": fuzzy +
-   full-text + **keyword-embedding** + graph traversal + temporal decay +
+   recall, discovery, disambiguation, "what do we know about X". BOTH
+   the fuzzy and the embedding pathways are **keyword-mediated**: the
+   query is matched against keyword-entity content (via pg_trgm) and
+   keyword embeddings, then entities surface via `tagged_with`. A
+   two-level diversity quota (per-search-term + per-keyword, geometric
+   decay) keeps results balanced + graph traversal + temporal decay +
    `final_rank`.
 2. **`POST /api/v1/agent/query`** (ask it to *delegate to a subagent* for
    anything multi-step) — research/investigation that needs several hops.
@@ -42,16 +46,18 @@ Before doing any work, consult your memory:
 # 1. Get always-on rules (behavioral guidelines)
 curl -s http://localhost:8000/api/v1/memory/rules
 
-# 2. Get context — use multi-query for better coverage
+# 2. Get context — use multi-query with NARROW queries for better coverage
 curl -s -X POST http://localhost:8000/api/v1/memory/context \
   -H "Content-Type: application/json" \
-  -d '{"queries": ["user profile background expertise", "<what you are working on>"], "max_depth": 3, "max_results": 15}'
+  -d '{"queries": ["user-profile", "Dimitrios", "<one broader topic angle>"], "max_depth": 3}'
 ```
 
 The context response gives you `items` (ranked memories) and `always_on_rules` (always injected).
 Trust higher `final_rank` items more. Check `depth` — depth 0 is a direct match, 1-3 are graph-connected.
 
 Multi-query runs each query independently, merges seeds (keeping the best score per entity), then does one graph expansion on the combined set. Use it to cover multiple angles in a single call.
+
+**Query strategy**: prefer multiple **narrow** queries (single keywords / bare names) alongside one broader phrase, NOT a single long sentence. Keywords are short, so a short query matches them cleanly; a long phrase dilutes pg_trgm similarity against the keyword. The per-search-term diversity quota reserves slots for each query you pass, so a bare name like `"Petros"` will always surface its specific facts even when paired with broader semantic angles. `max_results` defaults to 30 — leave it unless you have a reason.
 
 If results seem weak, retry with reformulated queries (up to 2 times).
 

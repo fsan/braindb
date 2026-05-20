@@ -144,16 +144,19 @@ See [BRAINDB_GUIDE.md](BRAINDB_GUIDE.md) for full API reference with curl exampl
 
 ## How Retrieval Works
 
-`POST /api/v1/memory/context` is the main endpoint:
+`POST /api/v1/memory/context` is the main endpoint. **Keywords are the indexing layer** — both the fuzzy and the embedding pathways match the query against keyword-entity content / embeddings, then entities surface via `tagged_with` edges. A keyword tagged on many entities is the hub; you don't need explicit `elaborates` / `refers_to` edges for an entity to be findable, as long as it has the right keywords.
 
-1. **Multi-query search** — pass `queries: ["topic1", "topic2"]` to search multiple angles at once. Each query runs 4-tier scoring (AND fulltext, OR fulltext fallback, content trigram, title trigram), seeds are merged keeping the best score per entity.
-2. **Keyword embeddings** — query terms are also matched against keyword entity embeddings (Qwen3-Embedding-0.6B, 1024-dim, cosine similarity). Text and embedding scores are combined via geometric mean (with a configurable penalty when only one signal matches).
-3. **Graph traversal** up to 3 hops via relations, relevance fading: `1.0 → 0.6 → 0.3`
-4. **Temporal decay** — memories fade over time, strengthen on access
-5. **Final rank** = `combined_score × effective_importance × accumulated_relevance`
-6. **Always-on rules** injected regardless of query
+1. **Multi-query search** — pass `queries: ["topic1", "topic2"]` to search multiple angles at once. Each query is matched against keyword entities by both pg_trgm trigram similarity AND query-embedding-vs-keyword-embedding cosine similarity; results are merged with the geometric mean (configurable `missing_signal_penalty` when only one signal fires).
+2. **Per-search-term reservation (L1 diversity quota)** — each query you pass gets a guaranteed share of the result slots filled from THAT query's own top-ranked entities. Bare-keyword queries (`"Petros"`) reliably surface specific facts even when paired with broader semantic angles.
+3. **Per-keyword reservation (L2 diversity quota)** — each dominant matched keyword gets a halving slot allowance (50% / 25% / 12.5% ..., floor 1). Stops one popular hub keyword (e.g. `user-profile` tagging 100 facts) from monopolising top-N.
+4. **Graph traversal** up to 3 hops via relations, relevance fading: `1.0 → 0.6 → 0.3`.
+5. **Temporal decay** — memories fade over time, strengthen on access.
+6. **Final rank** = `combined_score × effective_importance × accumulated_relevance`. The LLM-visible cap stays at the caller's `max_results` (default 30); the scoring pool internally considers up to 500 candidates per query so narrow keywords are never excluded before they're evaluated.
+7. **Always-on rules** injected regardless of query.
 
 Single `query` (string) still works for backward compatibility.
+
+**Query strategy** — prefer multiple short queries (a bare keyword + 1–2 broader phrases) over one long sentence. The keyword "Petros" matches the `Petros` keyword cleanly; the phrase "Petros person identity profile" matches the SAME keyword at a much lower score because pg_trgm dilutes against a longer query.
 
 ---
 

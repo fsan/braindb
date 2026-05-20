@@ -22,19 +22,24 @@ The API runs at **http://localhost:8000**. Everything is done via HTTP calls.
 ### Before answering anything non-trivial, always call:
 ```
 POST /api/v1/memory/context
-{"queries": ["topic 1", "topic 2"], "max_depth": 3, "max_results": 15}
+{"queries": ["bare-keyword-1", "bare-keyword-2", "one broader phrase"], "max_depth": 3}
 ```
 This returns:
-- Direct matches (fuzzy + full-text) across all queries, merged by best score
+- Direct matches (keyword-mediated fuzzy + keyword-mediated embedding) across all queries
 - Graph-connected entities up to 3 hops away (relevance fades: 100% -> 60% -> 30%)
+- Two-level diversity quota applied: per-search-term reservation (each query gets a guaranteed share) + per-keyword halving cap on the open remainder
 - Always-on rules (always injected regardless of query)
 
-Each item has a `final_rank` score. Trust higher-ranked items more.
+Each item has a `final_rank` score. Trust higher-ranked items more. `max_results` defaults to 30; the scoring pool internally considers up to 500 candidates per query so narrow keywords aren't excluded before they're evaluated.
 
-You can also pass a single query for backward compatibility:
+**Query strategy.** Prefer **multiple narrow queries** (single keywords, bare names) over one long sentence. Keywords are short, so a short query matches them at high pg_trgm similarity; a long phrase dilutes the trigram set and pushes narrow-subject facts down the ranking. Examples:
+
 ```
-{"query": "single topic", "max_depth": 3}
+GOOD:  "queries": ["Petros", "Selonda Saronikos fish farm", "Dimitrios manager"]
+BAD:   "queries": ["Petros person identity profile relation to Dimitris"]
 ```
+
+The per-search-term quota reserves slots for each query you pass, so the bare-keyword query is guaranteed to surface its specific facts even when paired with broader angles. Single `query` (string) still works for backward compatibility.
 
 ### After learning something new, save it:
 ```
@@ -236,14 +241,23 @@ curl -X POST http://localhost:8000/api/v1/memory/search \
 curl -X POST http://localhost:8000/api/v1/memory/context \
   -H "Content-Type: application/json" \
   -d '{
-    "queries": ["user profile expertise", "project architecture decisions"],
+    "queries": ["user-profile", "expertise", "project-decision"],
     "max_depth": 3,
-    "max_results": 15,
     "include_always_on_rules": true
   }'
 ```
 
-Each query runs fuzzy + full-text search independently. Seeds are merged keeping the **best score** per entity. One graph expansion runs on the combined seed set.
+Each query runs through TWO keyword-mediated pathways in parallel:
+- **Fuzzy** — `pg_trgm similarity(content, query)` over keyword entities.
+- **Embedding** — Qwen3-Embedding-0.6B (1024-dim) cosine similarity between the query and keyword-entity embeddings.
+
+Entities surface via `tagged_with` from the matched keywords. Per-entity score = `max(matched-keyword similarity)` on each pathway. Both signals are merged with the geometric mean (configurable `missing_signal_penalty` when only one signal fires).
+
+After scoring, **two diversity quotas** apply:
+1. **Per-search-term** — each query in `queries[]` reserves `ceil(max_results × per_query_share / num_queries)` slots filled from its own top-ranked entities. Knob: `per_query_share` (default 0.5; set to 0 to disable).
+2. **Per-keyword (halving)** — walking the remaining slots in `final_rank`-desc order, each new dominant keyword gets a halving allowance (50% / 25% / 12.5% ..., floor 1). Knob: `keyword_quota_halving` (default 0.5; set to 1.0 to disable).
+
+`max_results` defaults to 30 (LLM-visible cap). The internal scoring pool considers up to 500 keyword neighbours per query (`scoring_pool_keyword_neighbors`) and up to 500 fuzzy candidates (`scoring_pool_fuzzy`) — cheap pure-SQL/vector work, so narrow keywords aren't excluded before they're evaluated. None of these knobs are env-driven; tune them in [`braindb/config.py`](braindb/config.py) if needed.
 
 **Single query** (backward-compatible):
 ```bash
@@ -400,13 +414,19 @@ This is complementary to `source_entity_id` (on facts — links to a specific so
 
 ## How Search Works
 
-The search uses a 4-tier scoring system:
+Two different paths, two different scoring models:
+
+**`POST /api/v1/memory/search`** (and the `quick_search` agent tool) — **content-matching** with a 4-tier score against entity content directly:
 1. **Full-text AND match** (all query words match) — highest weight (1.0)
 2. **Full-text OR match** (any query word matches) — lower weight (0.3)
 3. **Content trigram similarity** — fuzzy character matching (0.5)
 4. **Title trigram similarity** — fuzzy title matching (0.3)
 
-This means specific queries with terms that appear in stored content work best. Vague queries with stop words ("everything about X") may return fewer results. If you get 0 results, reformulate with more specific terms.
+This is for "find me entities whose CONTENT mentions these terms" — useful for arbitrary text matching, but it dilutes when the query is much longer than what's in the entity.
+
+**`POST /api/v1/memory/context`** (the sophisticated path) — **keyword-mediated**. Both the fuzzy and embedding pathways match the query against keyword entities (not entity bodies); entities surface via `tagged_with`. Then graph traversal, decay, two-level diversity quota, ranking. See the "Context" section above for the full pipeline.
+
+Use `/memory/search` for raw text matching; use `/memory/context` for everything that involves *understanding* a subject. If you get 0 results from either, reformulate with more specific terms.
 
 ---
 
@@ -438,7 +458,7 @@ The `final_rank` in context results already accounts for decay.
 3. **Notes are a log** — use `notes` on any entity to record how your understanding evolved
 4. **always_on rules are limited to 10** — keep them high-signal; use on-demand rules for specifics
 5. **access_count reinforces memory** — things you retrieve often stay important longer
-6. **Multi-query for better recall** — use `queries` (array) instead of `query` (single) to search multiple angles at once
+6. **Multi-query for better recall** — use `queries` (array) instead of `query` (single) AND prefer multiple **narrow** queries (single keywords / bare names) over one long phrase. Each query in `queries[]` reserves a share of result slots, so a bare keyword is guaranteed to surface its facts. `max_results` defaults to 30.
 7. **Content should be concise** — 1-2 sentences, standalone, using full terms (not abbreviations)
 8. **Use the tree endpoint** to explore how an entity connects to others: `GET /memory/tree/<id>`
 9. **Use the list endpoint** to browse entities: `GET /entities?entity_type=fact&limit=50`

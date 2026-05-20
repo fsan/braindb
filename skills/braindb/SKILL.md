@@ -91,8 +91,11 @@ BrainDB's power is the graph + embeddings + ranking. Use it; do not fall back
 to flat SQL.
 
 1. **`POST /api/v1/memory/context`** (multi-query) — the default for ALL
-   recall, discovery, and understanding: fuzzy + full-text + **keyword
-   embedding** + graph traversal + decay + ranking.
+   recall, discovery, and understanding. BOTH the fuzzy and embedding
+   pathways are **keyword-mediated** (the query matches against keyword
+   entities, entities surface via `tagged_with`). A two-level diversity
+   quota (per-search-term + per-keyword halving) keeps results
+   balanced. Then graph traversal + decay + ranking.
 2. **`POST /api/v1/agent/query` with "delegate to a subagent…"** — for
    multi-step investigation/disambiguation; the agent researches and returns a
    summary.
@@ -125,18 +128,20 @@ decide from previews, then read only what you need:
 
 Analyze the user's message. Extract the **core topics** that need memory context. Create **multiple targeted queries** — do NOT paste the raw user message.
 
-**Important**: Use terms that match how entities are STORED, not natural language questions. The search uses trigram similarity + full-text matching. Specific terms that would appear in stored content work best. Vague queries with stop words ("everything about X") will return nothing.
+**Query strategy** — BrainDB's retrieval is keyword-mediated, so:
 
-Include likely keywords in your queries: `user-profile`, `expertise`, `project-decision`, `user-preference`.
+- Prefer **multiple narrow queries** (single keywords / bare names) over one long sentence. Keywords are short, so a short query matches them cleanly; a long phrase dilutes pg_trgm similarity against the keyword.
+- The per-search-term quota reserves slots for EACH query you pass, so adding a bare keyword as one of your queries guarantees it surfaces (it doesn't compete with the broader phrases).
+- Use terms that match how entities are STORED. Common keyword conventions: `user-profile`, `expertise`, `project-decision`, `user-preference`.
 
-Examples:
+Examples (narrow + one broader angle, mixed):
 
 | User says | Queries |
 |-----------|---------|
-| "help me refactor this React component" | `["user-profile React frontend expertise", "user-preference code style refactoring"]` |
-| "let's work on the IR pipeline" | `["investor-relations IR scraping architecture", "user-preference deployment workflow"]` |
-| (new conversation, no specific topic) | `["user-profile expertise role background", "user-preference working style"]` |
-| "what's the best way to deploy this?" | `["deployment infrastructure project-decision", "user-preference production services"]` |
+| "help me refactor this React component" | `["user-profile", "React", "user-preference code style refactoring"]` |
+| "let's work on the IR pipeline" | `["investor-relations", "IR", "deployment workflow"]` |
+| (new conversation, no specific topic) | `["user-profile", "expertise", "working style"]` |
+| "what's the best way to deploy this?" | `["deployment", "infrastructure", "production services"]` |
 
 Always include a `"user-profile"` query on the first message of a conversation — you need to know who you're talking to.
 
@@ -145,8 +150,10 @@ Always include a `"user-profile"` query on the first message of a conversation �
 ```bash
 curl -s -X POST http://localhost:8000/api/v1/memory/context \
   -H "Content-Type: application/json" \
-  -d '{"queries": ["query1", "query2"], "max_depth": 3, "max_results": 15}'
+  -d '{"queries": ["narrow1", "narrow2", "one broader phrase"], "max_depth": 3}'
 ```
+
+`max_results` defaults to 30 — leave it unless you specifically want fewer.
 
 ### Step 3: Evaluate results and retry if weak
 
