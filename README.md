@@ -172,7 +172,7 @@ curl -X POST http://localhost:8000/api/v1/agent/query \
 # {"answer": "The user is ...", "max_turns": 15}
 ```
 
-The agent has 21 tools — every single BrainDB endpoint plus `delegate_to_subagent` (which spawns a fresh agent in its own context for focused deep work) and `submit_result` (which ends the loop).
+The agent has 21 tools — every single BrainDB endpoint plus `delegate_to_subagent` (which spawns a fresh agent in its own context for focused deep work) and `final_answer` (which ends the loop with a validated typed payload).
 
 **LLM provider — pluggable via `.env`**:
 

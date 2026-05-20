@@ -362,7 +362,7 @@ curl -X POST http://localhost:8000/api/v1/agent/query \
   -d '{"query":"Delegate to a subagent: find near-duplicate facts and return top 10 pairs with their IDs."}'
 ```
 
-The agent has these tools internally: `recall_memory`, `quick_search`, `save_fact`, `save_thought`, `save_source`, `save_rule`, `ingest_file`, `get_entity`, `list_entities`, `update_entity`, `delete_entity`, `create_relation`, `view_entity_relations`, `delete_relation`, `view_tree`, `search_sql`, `view_log`, `get_stats`, `generate_embeddings`, `delegate_to_subagent`, `submit_result`.
+The agent has these tools internally: `recall_memory`, `quick_search`, `save_fact`, `save_thought`, `save_source`, `save_rule`, `ingest_file`, `get_entity`, `list_entities`, `update_entity`, `delete_entity`, `create_relation`, `view_entity_relations`, `delete_relation`, `view_tree`, `search_sql`, `view_log`, `get_stats`, `generate_embeddings`, `delegate_to_subagent`, `final_answer`.
 
 **Setup (pick a provider)**:
 - **DeepInfra (default)**: set `LLM_PROFILE=deepinfra` and `DEEPINFRA_API_KEY=...` in `.env`. Get a key at https://deepinfra.com/
