@@ -565,3 +565,108 @@ def test_maintainer_decision_happy_path_still_works() -> None:
         rationale="new subject, no existing wiki",
     )
     assert d3.proposed_name == "Sawki"
+
+
+# ------------------------------------------------------------------ #
+# JSON-string-of-dict acceptance (vLLM/Qwen quirk)                    #
+# ------------------------------------------------------------------ #
+#
+# Some providers (notably vLLM serving Qwen3.6-27B-AWQ-INT4) emit the
+# tool-call argument `payload` as a JSON-ENCODED STRING instead of a
+# JSON object:
+#   {"payload": "{\"action\": \"skip\", \"rationale\": \"...\"}"}
+# rather than the expected
+#   {"payload": {"action": "skip", "rationale": "..."}}
+# This is technically OpenAI-spec-compliant (the outer `arguments`
+# field IS a string of JSON per the spec), but the SDK only unwraps
+# once and then hands the inner value to Pydantic — which then rejects
+# the still-string-form with "Input should be a valid dictionary".
+#
+# The `@model_validator(mode="before")` on each typed model parses a
+# JSON-string-of-dict into a dict before field validation. Dict inputs
+# pass through unchanged so well-behaved providers (deepinfra, OpenAI
+# native) see no behavioural difference. The LLM-visible schema does
+# NOT advertise string-form acceptance — this is a server-side safety
+# net only.
+
+
+def test_agent_answer_accepts_json_string_payload() -> None:
+    """AgentAnswer.model_validate('{"answer": "x"}') succeeds — that's
+    the exact shape vLLM/Qwen emits. Without the model_validator, this
+    would raise 'Input should be a valid dictionary'."""
+    a = AgentAnswer.model_validate('{"answer": "hello world"}')
+    assert a.answer == "hello world"
+
+
+def test_maintainer_decision_accepts_json_string_payload() -> None:
+    """The four-action contract still holds when the LLM JSON-encodes
+    its payload as a string. Including the per-field coercers running
+    on the parsed dict (target_wiki_no='' → None)."""
+    raw = '{"action": "skip", "target_wiki_no": "", "rationale": "pytest litter"}'
+    d = MaintainerDecision.model_validate(raw)
+    assert d.action == "skip"
+    assert d.target_wiki_no is None
+    assert d.rationale == "pytest litter"
+
+
+def test_wiki_write_result_accepts_json_string_payload() -> None:
+    raw = '{"mode": "create", "canonical_no": null, "body": "# Wiki body"}'
+    r = WikiWriteResult.model_validate(raw)
+    assert r.mode == "create"
+    assert r.canonical_no is None
+    assert r.body == "# Wiki body"
+
+
+def test_subagent_result_accepts_json_string_payload() -> None:
+    """SubagentResult is the simplest model — single string field — and
+    the most common one for Qwen to mis-shape on retry. Verified live."""
+    raw = '{"result": "Found 3 entities matching the subject."}'
+    s = SubagentResult.model_validate(raw)
+    assert s.result == "Found 3 entities matching the subject."
+
+
+def test_dict_payload_still_passes_through_unchanged() -> None:
+    """The whole point of mode='before' is to leave well-behaved provider
+    output untouched. A regular dict input must validate exactly as
+    today, with NO json.loads attempt anywhere in the flow."""
+    # Happy path on all four models with normal dict input.
+    assert AgentAnswer.model_validate({"answer": "x"}).answer == "x"
+    assert MaintainerDecision.model_validate(
+        {"action": "create", "proposed_name": "Petros", "rationale": "new subject"}
+    ).proposed_name == "Petros"
+    assert WikiWriteResult.model_validate(
+        {"mode": "attach", "body": "# Body"}
+    ).mode == "attach"
+    assert SubagentResult.model_validate({"result": "done"}).result == "done"
+
+
+def test_non_json_string_still_fails_clearly() -> None:
+    """If the LLM sends a string that isn't a parseable JSON object,
+    we let Pydantic raise its usual "valid dictionary" error so the
+    LLM gets a clear signal to fix the shape on Layer 4 retry.
+    Specifically: a plain-text string (not JSON), a JSON-string of
+    a non-object, and a JSON-string of garbage all still fail."""
+    from pydantic import ValidationError
+
+    bad_inputs = [
+        "I am done",                       # not JSON at all
+        "[1, 2, 3]",                       # JSON, but a list — not a dict
+        '"just a string"',                 # JSON, but a string
+        "42",                              # JSON, but a number
+        "null",                            # JSON, but null
+    ]
+    for bad in bad_inputs:
+        with pytest.raises(ValidationError):
+            AgentAnswer.model_validate(bad)
+
+
+def test_json_string_with_missing_required_field_still_fails() -> None:
+    """The model_validator parses the JSON but does NOT silence
+    structural errors — if the parsed dict is missing required
+    fields, Pydantic still raises clearly."""
+    from pydantic import ValidationError
+
+    # MaintainerDecision requires `action` and `rationale`.
+    with pytest.raises(ValidationError) as exc:
+        MaintainerDecision.model_validate('{"action": "skip"}')  # rationale missing
+    assert "rationale" in str(exc.value).lower() or "field required" in str(exc.value).lower()

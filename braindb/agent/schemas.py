@@ -10,9 +10,10 @@ structured output instead of free-running and truncating.
 These mirror the style of `braindb/schemas/` (the REST layer); they reuse the
 existing pydantic dependency — no new dependency, no new machinery.
 """
+import json
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 # Coercion helpers — weak/quantised models often emit "" (empty string) for
@@ -22,6 +23,43 @@ from pydantic import BaseModel, Field, field_validator
 # so we don't reject a perfectly intended "skip" decision because the model
 # sent `target_wiki_no=""` instead of `null`. The validation contract is
 # unchanged — we still produce a properly-typed Pydantic instance.
+
+
+# Top-level coercion — some providers (notably vLLM / Qwen) emit tool-call
+# `arguments.payload` as a JSON-encoded STRING ("{\"action\": \"skip\", ...}")
+# instead of a JSON object ({"action": "skip", ...}). This is technically
+# OpenAI-spec-compliant (the outer `arguments` field IS defined as a string
+# of JSON), but the SDK only unwraps once and then hands the inner value to
+# Pydantic as-is — so when the inner value is itself a JSON string, Pydantic
+# rejects it with "Input should be a valid dictionary".
+#
+# The `@model_validator(mode="before")` below catches this case: if the input
+# is a string that parses as JSON to a dict, we use the parsed dict; if it
+# parses to anything else (list / int / null), we let Pydantic raise its
+# usual "valid dictionary" error so the LLM sees a clear correction. Dict
+# inputs are passed through untouched — well-behaved providers (deepinfra,
+# OpenAI, Anthropic via LiteLLM) see exactly the same behaviour as today.
+#
+# This is the SAME pattern as the nullable-field coercion above, just at the
+# whole-model level rather than per-field. The LLM-visible schema is
+# unchanged; we don't advertise string-form acceptance to the model.
+
+def _maybe_parse_json_string(v):
+    """If `v` is a JSON-encoded string of an object, parse it. Otherwise
+    pass through unchanged. Pydantic v2 calls @model_validator(mode='before')
+    BEFORE field-level validation, so a returned dict goes through the rest
+    of the validation pipeline (including the per-field coercers below)
+    exactly as if the LLM had sent a dict in the first place."""
+    if isinstance(v, str):
+        try:
+            parsed = json.loads(v)
+        except (json.JSONDecodeError, ValueError):
+            return v  # let Pydantic raise its normal error
+        # Only return the parsed value if it's a dict — anything else (list,
+        # int, null) is not a valid Pydantic-model input; let Pydantic raise.
+        if isinstance(parsed, dict):
+            return parsed
+    return v
 
 def _coerce_empty_to_none(v):
     """Accept '', 'null', 'none', 'n/a' (any case, with/without whitespace)
@@ -62,6 +100,14 @@ class AgentAnswer(BaseModel):
     top-level model output.
     """
     answer: str = Field(..., description="The full natural-language response to the caller.")
+
+    # Safety net for providers (notably vLLM/Qwen) that emit the tool-call
+    # arg as a JSON-encoded string instead of a JSON object. See the helper
+    # docstring at the top of the file.
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_json_string(cls, v):
+        return _maybe_parse_json_string(v)
 
 
 class MaintainerDecision(BaseModel):
@@ -125,6 +171,12 @@ class MaintainerDecision(BaseModel):
         ),
     )
 
+    # Top-level coercion: accept JSON-string-of-dict (vLLM/Qwen quirk).
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_json_string(cls, v):
+        return _maybe_parse_json_string(v)
+
     # Forgiving coercion — weak/quantised models often emit empty strings or
     # "null" strings instead of literal JSON null. Accept those as None
     # rather than rejecting the whole submission (the prompt and the
@@ -183,6 +235,12 @@ class WikiWriteResult(BaseModel):
         ),
     )
 
+    # Top-level coercion: accept JSON-string-of-dict (vLLM/Qwen quirk).
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_json_string(cls, v):
+        return _maybe_parse_json_string(v)
+
     @field_validator("canonical_no", mode="before")
     @classmethod
     def _coerce_canonical_no(cls, v):
@@ -192,3 +250,9 @@ class WikiWriteResult(BaseModel):
 class SubagentResult(BaseModel):
     """A delegated subagent's return (replaces the free-string subagent answer)."""
     result: str = Field(..., description="The distilled result of the delegated task.")
+
+    # Top-level coercion: accept JSON-string-of-dict (vLLM/Qwen quirk).
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_json_string(cls, v):
+        return _maybe_parse_json_string(v)
