@@ -50,6 +50,17 @@ class Settings(BaseSettings):
     # Scoring
     missing_signal_penalty: float = 0.5   # multiplier when only text OR only embedding matches (0-1)
 
+    # Scoring-pool caps. These bound the CANDIDATE pool that feeds ranking
+    # (pure SQL/vector work — cheap, runs once per query). They are NOT the
+    # LLM-visible cap; the caller's `max_results` truncates the FINAL sorted
+    # items list. Keeping these wide is essential: a narrow single-word
+    # keyword (e.g. "Petros") embedded against a multi-word sentence query
+    # may not place in the top 30 most-similar keywords even when it's the
+    # exact match — without enough headroom, nothing tagged with that
+    # keyword enters the scoring pool at all.
+    scoring_pool_keyword_neighbors: int = 500   # top-K keyword embeddings to consider
+    scoring_pool_fuzzy: int = 500               # top-K fuzzy/full-text candidates to consider
+
     # Always-on rules cap
     max_always_on_rules: int = 10
 

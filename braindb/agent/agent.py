@@ -177,10 +177,18 @@ async def run_typed(
         await Runner.run(starting_agent=agent, input=query, max_turns=turns)
         payload = slot.value
         if not isinstance(payload, expected_cls):
+            # NOTE: this fires whenever `Runner.run` returns and no `submit_*`
+            # tool was called. The two real causes are (a) the model ended
+            # the run by emitting plain prose with no tool call (the SDK
+            # terminates naturally at that point) and (b) the SDK hit its
+            # own max_turns guard. The SDK raises `MaxTurnsExceeded`
+            # separately for (b), so by the time we get here it is almost
+            # always (a) — a model-discipline failure on the final turn.
             raise RuntimeError(
-                f"{agent.name} did not submit a {expected_cls.__name__} "
-                f"(got {type(payload).__name__}). Likely max_turns "
-                f"exhausted without calling submit_result."
+                f"{agent.name} did not call submit_result with a "
+                f"{expected_cls.__name__} (got {type(payload).__name__}). "
+                f"The run terminated without the typed final tool firing — "
+                f"the model likely ended with plain prose."
             )
         return payload
     finally:

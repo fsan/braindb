@@ -146,8 +146,14 @@ def assemble_context(conn, req: ContextRequest) -> ContextResponse:
     text_scores: dict = {}       # entity_id → best text score
     seed_rows_by_id: dict = {}   # entity_id → row data
 
+    # Scoring pool — pull a wide candidate set, independent of req.max_results
+    # (which is the LLM-visible final cap). Pure SQL via pg_trgm + fulltext,
+    # bounded by LIMIT — runs in milliseconds even at 500.
     for q in query_list:
-        rows = fuzzy_search(conn, q, req.entity_types, req.min_importance, limit=max(req.max_results, 20))
+        rows = fuzzy_search(
+            conn, q, req.entity_types, req.min_importance,
+            limit=settings.scoring_pool_fuzzy,
+        )
         for r in rows:
             eid = r["id"]
             score = r["score"]
@@ -167,7 +173,13 @@ def assemble_context(conn, req: ContextRequest) -> ContextResponse:
             query_emb = emb_svc.embed(q)
             if not query_emb:
                 continue
-            similar_kw = find_similar_keywords(conn, query_emb, limit=30)
+            # Scoring pool — same principle: wide candidate set for the
+            # embedding pathway. A narrow keyword may rank far below 30 for
+            # a sentence-shaped query even when it's an exact term match;
+            # widening here keeps it visible to the rest of the pipeline.
+            similar_kw = find_similar_keywords(
+                conn, query_emb, limit=settings.scoring_pool_keyword_neighbors,
+            )
             if not similar_kw:
                 continue
             kw_sim = {str(kw["id"]): kw["similarity"] for kw in similar_kw}

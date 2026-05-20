@@ -147,9 +147,18 @@ def find_entities_for_keywords(conn, keyword_entity_ids: list[str]) -> list[dict
         return []
 
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        # Cast array_agg to text[] so psycopg2 returns a proper Python list
+        # of UUID strings. Without the explicit cast the column type comes
+        # back as a literal Postgres array string ('{uuid1,uuid2}') because
+        # psycopg2's default uuid[] adapter is not registered — iterating
+        # over that string yields single characters and downstream
+        # `kw_sim.get(mid, 0)` returns 0 for ALL matched keywords, silently
+        # zeroing the entire embedding-based recall path. The same cast
+        # pattern is already used for `wikis_ext.member_keyword_ids::text[]`
+        # in context.py.
         cur.execute(
             """
-            SELECT e.*, array_agg(r.to_entity_id) AS matched_keyword_ids
+            SELECT e.*, array_agg(r.to_entity_id::text) AS matched_keyword_ids
             FROM entities e
             JOIN relations r ON r.from_entity_id = e.id
             WHERE r.to_entity_id = ANY(%s::uuid[])
