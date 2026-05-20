@@ -12,7 +12,7 @@ Fact-extraction pipeline (watcher-orchestrated):
   the chunk text directly from the prompt (no get_entity), extracts
   concrete facts, saves each via save_fact, and links each back to the
   datasource via create_relation(derived_from). Returns the list of new
-  fact IDs in submit_result for the watcher to parse.
+  fact IDs in final_answer for the watcher to parse.
 
   Phase B — one /agent/query with only the fact IDs + their 1-sentence
   content prefetched by the watcher. The central review agent creates
@@ -145,7 +145,7 @@ def fetch_entity(entity_id: str) -> dict | None:
 def extract_facts_from_chunk(ds_id: str, title: str, idx: int, total: int, chunk_text: str) -> list[str]:
     """Ask one agent call to extract facts from a chunk, save each via save_fact,
     and link each back to the datasource via create_relation(derived_from).
-    Returns the list of new fact IDs parsed from the agent's submit_result answer.
+    Returns the list of new fact IDs parsed from the agent's final_answer answer.
     """
     prompt = (
         f"A document was just ingested into BrainDB.\n"
@@ -166,7 +166,7 @@ def extract_facts_from_chunk(ds_id: str, title: str, idx: int, total: int, chunk
         f'     relevance_score=0.9, description="Fact extracted from {title}").\n\n'
         f"Do NOT call get_entity. Do NOT call update_entity on the datasource.\n"
         f"Do NOT touch the datasource content — it is read-only.\n\n"
-        f"When all facts in this chunk are processed, call submit_result with\n"
+        f"When all facts in this chunk are processed, call final_answer with\n"
         f"exactly this format so the watcher can parse it:\n"
         f'  "Saved N facts from chunk {idx}/{total}: <fact_id_1>, <fact_id_2>, ..."\n\n'
         f"<content>\n{chunk_text}\n</content>"
@@ -217,7 +217,7 @@ def central_review(ds_id: str, title: str, fact_ids: list[str]) -> None:
         f"   related, link them with tagged_with or refers_to.\n\n"
         f"Do NOT call get_entity — all facts are listed above. Do NOT touch the\n"
         f"datasource content.\n\n"
-        f"When done, call submit_result with a short summary of what you added."
+        f"When done, call final_answer with a short summary of what you added."
     )
     answer = call_agent(prompt, max_turns=30)
     if answer is None:

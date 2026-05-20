@@ -1,13 +1,13 @@
 """
 BrainDB internal agent — builder and runners.
 
-Convention (absolute): every agent run finishes via the `submit_result`
+Convention (absolute): every agent run finishes via the `final_answer`
 trick, and that tool's argument is ALWAYS a typed Pydantic model. The LLM
 never emits loose / free-form output we then scrape.
 
 There is one agent per purpose, differing only by which typed
-`submit_*` variant it carries (all named "submit_result" so prompts and
-`StopAtTools(["submit_result"])` stay generic). The structured contract
+`submit_*` variant it carries (all named "final_answer" so prompts and
+`StopAtTools(["final_answer"])` stay generic). The structured contract
 lives on the **tool argument schema** (`@function_tool` + Pydantic),
 which is what the user wanted: validated final answer, free middle
 turns. We deliberately do NOT set `output_type` on the Agent — that flag
@@ -27,6 +27,7 @@ from typing import TypeVar
 from agents import Agent, ModelSettings, Runner, StopAtTools, set_tracing_disabled
 from agents.extensions.models.litellm_model import LitellmModel
 
+from braindb.agent.hooks import CountdownHooks
 from braindb.agent.run_state import install_slot, release_slot
 from braindb.agent.schemas import (
     AgentAnswer,
@@ -112,10 +113,10 @@ def _build(name: str, submit_tool) -> Agent:
         model=_model(),
         model_settings=ModelSettings(),
         tools=[*_BASE_TOOLS, submit_tool],
-        tool_use_behavior=StopAtTools(stop_at_tool_names=["submit_result"]),
+        tool_use_behavior=StopAtTools(stop_at_tool_names=["final_answer"]),
     )
     logger.info(
-        "Agent built: %s (model=%s) — free middle turns, typed submit_result",
+        "Agent built: %s (model=%s) — free middle turns, typed final_answer",
         name, settings.resolved_agent_model,
     )
     return agent
@@ -162,19 +163,28 @@ async def run_typed(
 ) -> T:
     """Run a typed agent and return the validated Pydantic instance it
     submitted. The instance is guaranteed-valid because the SDK validates
-    the LLM's `submit_result` call args against `expected_cls` BEFORE the
+    the LLM's `final_answer` call args against `expected_cls` BEFORE the
     tool body runs (via `@function_tool`'s strict JSON schema).
 
-    Raises `RuntimeError` if the run ends without `submit_result` firing
+    Raises `RuntimeError` if the run ends without `final_answer` firing
     (e.g. `max_turns` exhausted) — surfaces a real model failure instead
     of silently returning bad data. Routers handle this like any other
     agent error: log + release the job lease + 5xx.
     """
     turns = max_turns or settings.agent_max_turns
     slot, token = install_slot()
+    # Layer-3 nudge: when the run is about to exhaust `max_turns`, the hook
+    # appends a synthetic "you have N turns left, finalise via final_answer"
+    # user message to the conversation. One nudge per run; disabled when
+    # `agent_countdown_threshold == 0`. See braindb/agent/hooks.py.
+    hooks = CountdownHooks(
+        max_turns=turns,
+        threshold=settings.agent_countdown_threshold,
+        tool_name="final_answer",
+    )
     try:
         logger.info("Running typed query (%s): %s", agent.name, query[:160])
-        await Runner.run(starting_agent=agent, input=query, max_turns=turns)
+        await Runner.run(starting_agent=agent, input=query, max_turns=turns, hooks=hooks)
         payload = slot.value
         if not isinstance(payload, expected_cls):
             # NOTE: this fires whenever `Runner.run` returns and no `submit_*`
@@ -185,7 +195,7 @@ async def run_typed(
             # separately for (b), so by the time we get here it is almost
             # always (a) — a model-discipline failure on the final turn.
             raise RuntimeError(
-                f"{agent.name} did not call submit_result with a "
+                f"{agent.name} did not call final_answer with a "
                 f"{expected_cls.__name__} (got {type(payload).__name__}). "
                 f"The run terminated without the typed final tool firing — "
                 f"the model likely ended with plain prose."
@@ -197,7 +207,7 @@ async def run_typed(
 
 async def run_agent_query(query: str, max_turns: int | None = None) -> dict:
     """General recall/save path (public /agent/query, and the ingest watcher
-    over HTTP). The model finishes via `submit_result(payload: AgentAnswer)`;
+    over HTTP). The model finishes via `final_answer(payload: AgentAnswer)`;
     the response shape stays `{"answer","max_turns"}` for backward
     compatibility."""
     turns = max_turns or settings.agent_max_turns

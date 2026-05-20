@@ -1,7 +1,7 @@
 """
 Typed agent output contract.
 
-Convention (absolute): every agent/subagent finishes via the `submit_result`
+Convention (absolute): every agent/subagent finishes via the `final_answer`
 trick, and its payload is ALWAYS one of these Pydantic models — never a loose
 free string we scrape. `@function_tool` turns the model into a strict JSON
 schema for the tool arguments, so the LLM is constrained to emit valid
@@ -20,7 +20,7 @@ class AgentAnswer(BaseModel):
 
     The endpoint is general-purpose (Claude Code, arbitrary recall/save), so
     the answer itself is necessarily natural language — but it is still
-    delivered through the typed `submit_result` trick, never as loose
+    delivered through the typed `final_answer` trick, never as loose
     top-level model output.
     """
     answer: str = Field(..., description="The full natural-language response to the caller.")

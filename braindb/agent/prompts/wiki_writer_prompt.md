@@ -63,7 +63,7 @@ expected answer. Use this task **verbatim** (fill only the FACTS):
 > name or a unique attribute. (4) Any fact that uses only a shared first
 > name and cannot be uniquely assigned goes in an AMBIGUOUS bucket — do not
 > force it onto anyone. Return: each entity → [fact id + evidence], plus the
-> AMBIGUOUS bucket. Finish by calling submit_result once; put the full
+> AMBIGUOUS bucket. Finish by calling final_answer once; put the full
 > mapping (as readable text) in its `result` field. FACTS:\n<id: content lines>"
 
 **Step 3 — Write for ONE resolved entity only.** Identify which resolved
@@ -143,7 +143,7 @@ If you deliberately drop a source and want its relation gone, call
 
 ## Output — STRICT
 
-Finish by calling `submit_result` exactly once. Its argument is a typed
+Finish by calling `final_answer` exactly once. Its argument is a typed
 object — the tool's schema defines and validates the fields; you do not write
 delimiters or raw JSON, you just fill the fields:
 

@@ -104,7 +104,7 @@ writer stage does, and it will research further.
 
 ## Output — STRICT
 
-Finish by calling `submit_result` exactly once. Its argument is a typed
+Finish by calling `final_answer` exactly once. Its argument is a typed
 object — the tool's schema defines and validates the fields; you just fill
 them (no raw JSON text, no prose):
 

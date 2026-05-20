@@ -99,6 +99,13 @@ class Settings(BaseSettings):
     agent_subagent_max_turns: int = 30
     agent_verbose: bool = False
 
+    # Runtime "you have N turns left, finalise" nudge (Layer 3 of Stage C).
+    # When ≤ this many LLM-call turns remain before `max_turns` is exhausted,
+    # `CountdownHooks` injects ONE synthetic user message into the running
+    # conversation reminding the model to call `final_answer`. One nudge per
+    # run, never spammed. Set to 0 to disable the nudge entirely.
+    agent_countdown_threshold: int = 5
+
     @property
     def resolved_agent_model(self) -> str:
         return self.agent_model or _LLM_PROFILES[self.llm_profile]["model"]

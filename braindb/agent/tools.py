@@ -830,7 +830,7 @@ async def delegate_to_subagent(task: str) -> str:
     tool outputs. The subagent has access to all the same BrainDB tools.
 
     Write a clear, self-contained task description — the subagent doesn't see
-    your prior context. End by telling it to call submit_result with a summary.
+    your prior context. End by telling it to call final_answer with a summary.
 
     Args:
         task: A self-contained task description for the subagent.
@@ -867,12 +867,12 @@ async def delegate_to_subagent(task: str) -> str:
 # FINAL TOOL — stops the loop                                            #
 # ====================================================================== #
 
-# Convention (absolute): the run finishes ONLY by calling `submit_result`,
+# Convention (absolute): the run finishes ONLY by calling `final_answer`,
 # and its argument is ALWAYS a typed Pydantic model — never a loose string.
 # `@function_tool` validates the LLM's call args against the model BEFORE
 # invoking the body, so `payload` is guaranteed-valid inside each function.
 # There is one typed variant per agent purpose; every variant keeps the
-# name "submit_result" so prompts and `StopAtTools(["submit_result"])`
+# name "final_answer" so prompts and `StopAtTools(["final_answer"])`
 # stay generic.
 #
 # Each variant parks the validated payload into the per-Task ContextVar
@@ -886,32 +886,32 @@ async def delegate_to_subagent(task: str) -> str:
 # satisfy the schema on turn 1 and never call tools. The side-channel
 # capture keeps middle turns free while still delivering a typed final.
 
-@function_tool(name_override="submit_result")
-@_verbose("submit_result")
+@function_tool(name_override="final_answer")
+@_verbose("final_answer")
 async def submit_answer(payload: AgentAnswer) -> str:
     """Submit the final answer. Call this exactly once when you're done."""
     record_submit(payload)
     return "ok"
 
 
-@function_tool(name_override="submit_result")
-@_verbose("submit_result")
+@function_tool(name_override="final_answer")
+@_verbose("final_answer")
 async def submit_maintainer(payload: MaintainerDecision) -> str:
     """Submit the maintainer decision. Call this exactly once when you're done."""
     record_submit(payload)
     return "ok"
 
 
-@function_tool(name_override="submit_result")
-@_verbose("submit_result")
+@function_tool(name_override="final_answer")
+@_verbose("final_answer")
 async def submit_wiki(payload: WikiWriteResult) -> str:
     """Submit the finished wiki. Call this exactly once when you're done."""
     record_submit(payload)
     return "ok"
 
 
-@function_tool(name_override="submit_result")
-@_verbose("submit_result")
+@function_tool(name_override="final_answer")
+@_verbose("final_answer")
 async def submit_subagent(payload: SubagentResult) -> str:
     """Submit the delegated task result. Call this exactly once when you're done."""
     record_submit(payload)
