@@ -871,6 +871,21 @@ async def delegate_to_subagent(task: str) -> str:
 # and its argument is ALWAYS a typed Pydantic model — never a loose string.
 # `@function_tool` validates the LLM's call args against the model BEFORE
 # invoking the body, so `payload` is guaranteed-valid inside each function.
+#
+# strict_mode=False: critical. The default `strict_mode=True` activates
+# OpenAI structured-outputs strict JSON schema, which forces EVERY
+# property of the embedded Pydantic model into the schema's `required`
+# list — overriding Pydantic's own view that fields with `= None` or
+# `default_factory=...` are optional. On `MaintainerDecision` and
+# `WikiWriteResult`, that inflation makes the LLM emit args that pass
+# Pydantic but fail the over-strict schema, producing endless
+# "Invalid JSON input: 1 validation error" loops the Layer 4 retry
+# can't escape (verified live on deepinfra/Gemma against the wiki
+# maintainer). Turning strict_mode off makes the LLM-visible schema
+# match Pydantic's required list exactly; Pydantic still validates the
+# parsed args inside the tool body, so the typed-final contract is
+# unchanged — we just stop demanding the model emit fields it doesn't
+# need.
 # There is one typed variant per agent purpose; every variant keeps the
 # name "final_answer" so prompts and `StopAtTools(["final_answer"])`
 # stay generic.
@@ -886,7 +901,7 @@ async def delegate_to_subagent(task: str) -> str:
 # satisfy the schema on turn 1 and never call tools. The side-channel
 # capture keeps middle turns free while still delivering a typed final.
 
-@function_tool(name_override="final_answer")
+@function_tool(name_override="final_answer", strict_mode=False)
 @_verbose("final_answer")
 async def submit_answer(payload: AgentAnswer) -> str:
     """Submit the final answer. Call this exactly once when you're done."""
@@ -894,7 +909,7 @@ async def submit_answer(payload: AgentAnswer) -> str:
     return "ok"
 
 
-@function_tool(name_override="final_answer")
+@function_tool(name_override="final_answer", strict_mode=False)
 @_verbose("final_answer")
 async def submit_maintainer(payload: MaintainerDecision) -> str:
     """Submit the maintainer decision. Call this exactly once when you're done."""
@@ -902,7 +917,7 @@ async def submit_maintainer(payload: MaintainerDecision) -> str:
     return "ok"
 
 
-@function_tool(name_override="final_answer")
+@function_tool(name_override="final_answer", strict_mode=False)
 @_verbose("final_answer")
 async def submit_wiki(payload: WikiWriteResult) -> str:
     """Submit the finished wiki. Call this exactly once when you're done."""
@@ -910,7 +925,7 @@ async def submit_wiki(payload: WikiWriteResult) -> str:
     return "ok"
 
 
-@function_tool(name_override="final_answer")
+@function_tool(name_override="final_answer", strict_mode=False)
 @_verbose("final_answer")
 async def submit_subagent(payload: SubagentResult) -> str:
     """Submit the delegated task result. Call this exactly once when you're done."""

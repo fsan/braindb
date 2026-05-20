@@ -335,6 +335,45 @@ async def test_run_typed_correction_message_appended_on_retry() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "tool, model, pydantic_required",
+    [
+        (submit_answer, AgentAnswer, ["answer"]),
+        (submit_maintainer, MaintainerDecision, ["action", "rationale"]),
+        (submit_wiki, WikiWriteResult, ["mode", "body"]),
+        (submit_subagent, SubagentResult, ["result"]),
+    ],
+    ids=["answer", "maintainer", "wiki", "subagent"],
+)
+def test_submit_tool_schema_matches_pydantic_required(tool, model, pydantic_required) -> None:
+    """The LLM-visible JSON schema's `required` list (inside the embedded
+    payload definition) must match Pydantic's view of required fields,
+    NOT the OpenAI strict-mode "all fields required" force-list.
+
+    Background: with `@function_tool(strict_mode=True)` (the SDK default),
+    the embedded payload schema lists EVERY property in `required`,
+    regardless of `field: T | None = None` defaults at the Pydantic
+    level. That over-strictness causes weak models to emit `final_answer`
+    args that pass Pydantic but fail the inflated OpenAI-strict schema —
+    leading to "Invalid JSON input: 1 validation error" loops the
+    Layer 4 retry can't break out of (verified live on deepinfra/Gemma
+    against the wiki maintainer). Setting `strict_mode=False` makes the
+    submitted schema follow Pydantic's `required` faithfully; Pydantic
+    still validates the parsed args so the typed contract holds.
+    """
+    schema = tool.params_json_schema
+    # SDK wraps the payload model in a payload field; the model's own
+    # schema is in `$defs[<ModelName>]`.
+    inner = schema["$defs"][model.__name__]
+    assert set(inner["required"]) == set(pydantic_required), (
+        f"{tool.name} (model={model.__name__}): schema required="
+        f"{inner['required']!r}; expected to match Pydantic's "
+        f"{pydantic_required!r}. If this fails, the @function_tool "
+        f"likely still has strict_mode=True overriding Pydantic's "
+        f"required list."
+    )
+
+
 def test_typed_models_validate_strictly() -> None:
     """The @function_tool argument schemas are derived from these Pydantic
     models. Validation MUST reject malformed input — that's what protects
@@ -352,3 +391,117 @@ def test_typed_models_validate_strictly() -> None:
     # Round-trip a valid one to confirm the happy path still works.
     a = AgentAnswer(answer="x")
     assert a.answer == "x"
+
+
+# ------------------------------------------------------------------ #
+# Forgiving coercion on nullable / list fields                        #
+# ------------------------------------------------------------------ #
+#
+# Weak / quantised models often emit `""` (empty string) for nullable
+# fields instead of literal JSON `null`, and `null` for empty-list
+# fields instead of `[]`. The schema descriptions explicitly forbid
+# both, but the `mode="before"` field_validators in schemas.py are the
+# safety net: they accept the wrong-type variants gracefully so a
+# perfectly intended "skip" decision isn't rejected by a closing
+# Pydantic error. The validation contract is unchanged — we still
+# produce a properly-typed Pydantic instance.
+#
+# These tests cover the coercion behaviour and confirm the
+# action-dependent fields can be omitted-by-empty-string for non-attach
+# / non-create / non-consolidate actions.
+
+
+def test_maintainer_decision_coerces_empty_string_to_none() -> None:
+    """`target_wiki_no=""` / `proposed_name=""` from the LLM coerce to
+    None — Pydantic would normally reject `""` for `int | None`."""
+    d = MaintainerDecision(
+        action="skip",
+        target_wiki_no="",
+        proposed_name="",
+        consolidate_nos=[],
+        rationale="not worth a wiki",
+    )
+    assert d.target_wiki_no is None
+    assert d.proposed_name is None
+    assert d.consolidate_nos == []
+
+
+def test_maintainer_decision_coerces_null_string_to_none() -> None:
+    """Literal `"null"` / `"none"` / `"n/a"` strings (any case, surrounding
+    whitespace ok) coerce to None — matches what weak models emit when
+    they confuse "send JSON null" with "send the string null"."""
+    for sentinel in ["null", "Null", "NULL", "none", "  null  ", "n/a", "N/A"]:
+        d = MaintainerDecision(
+            action="skip",
+            target_wiki_no=sentinel,
+            proposed_name=sentinel,
+            consolidate_nos=[],
+            rationale="not worth a wiki",
+        )
+        assert d.target_wiki_no is None, f"target_wiki_no should coerce {sentinel!r} → None"
+        assert d.proposed_name is None, f"proposed_name should coerce {sentinel!r} → None"
+
+
+def test_maintainer_decision_coerces_numeric_string_to_int() -> None:
+    """`target_wiki_no="42"` (string-encoded integer from a weak model)
+    coerces to `42` rather than raising."""
+    d = MaintainerDecision(
+        action="attach",
+        target_wiki_no="42",
+        rationale="attach to wiki 42",
+    )
+    assert d.target_wiki_no == 42
+    assert isinstance(d.target_wiki_no, int)
+
+
+def test_maintainer_decision_coerces_null_consolidate_nos_to_empty_list() -> None:
+    """`consolidate_nos=None` (the weak model sent null instead of [])
+    coerces to []. Without this, Pydantic raises because the field is
+    `list[int]`, not `list[int] | None`."""
+    d = MaintainerDecision(
+        action="skip",
+        consolidate_nos=None,
+        rationale="not duplicates",
+    )
+    assert d.consolidate_nos == []
+
+
+def test_wiki_write_result_coerces_canonical_no() -> None:
+    """`canonical_no` (the wiki writer's consolidate-mode field) gets the
+    same treatment: empty string / null string → None; numeric string
+    → int."""
+    r = WikiWriteResult(mode="create", canonical_no="", body="# Wiki body")
+    assert r.canonical_no is None
+
+    r = WikiWriteResult(mode="create", canonical_no="null", body="# Wiki body")
+    assert r.canonical_no is None
+
+    r = WikiWriteResult(mode="consolidate", canonical_no="3", body="# Wiki body")
+    assert r.canonical_no == 3
+
+
+def test_maintainer_decision_happy_path_still_works() -> None:
+    """The coercion validators must NOT break the happy path where the
+    LLM sends well-typed values."""
+    d = MaintainerDecision(
+        action="attach",
+        target_wiki_no=7,
+        proposed_name=None,
+        consolidate_nos=[],
+        rationale="attach to wiki 7",
+    )
+    assert d.target_wiki_no == 7
+
+    d2 = MaintainerDecision(
+        action="consolidate",
+        consolidate_nos=[2, 5, 9],
+        rationale="all three describe the same subject",
+    )
+    assert d2.consolidate_nos == [2, 5, 9]
+
+    d3 = MaintainerDecision(
+        action="create",
+        proposed_name="Sawki",
+        rationale="new subject, no existing wiki",
+    )
+    assert d3.proposed_name == "Sawki"
