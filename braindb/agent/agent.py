@@ -20,12 +20,14 @@ its already-validated `payload` into `braindb.agent.run_state.last_submit`
 (a ContextVar). `run_typed` reads it back after `Runner.run` returns.
 asyncio's per-Task context isolation makes nested/parallel runs safe.
 """
+import json
 import logging
 from pathlib import Path
 from typing import TypeVar
 
 from agents import Agent, ModelSettings, Runner, StopAtTools, set_tracing_disabled
 from agents.extensions.models.litellm_model import LitellmModel
+from pydantic import BaseModel
 
 from braindb.agent.hooks import CountdownHooks
 from braindb.agent.run_state import install_slot, release_slot
@@ -92,6 +94,59 @@ _BASE_TOOLS = [
 ]
 
 T = TypeVar("T")
+
+
+def _expected_shape_hint(expected_cls: type[BaseModel]) -> str:
+    """Render a literal JSON-call shape for the `final_answer` tool, derived
+    from the Pydantic model the LLM must submit.
+
+    Weak/quantised models routinely emit the wrong WRAPPER on retry: either
+    they call `final_answer(<inner_dict>)` (missing the outer `payload`
+    key) or `final_answer({"payload": <broken_dict>})` (missing required
+    keys inside). The generic "call final_answer NOW" correction did not
+    fix this on Gemma-31B (verified live: subagent retry kept emitting the
+    same shape errors). Giving the model a literal JSON template that
+    matches the @function_tool argument schema closes that gap — the LLM
+    sees the exact key names and the outer wrapping it has to produce.
+
+    Example output for `SubagentResult`:
+        {"payload": {"result": "<your concise summary>"}}
+
+    For `MaintainerDecision` (skip action):
+        {"payload": {"action": "skip", "rationale": "<short justification>"}}
+
+    Only REQUIRED fields are filled with placeholders; optional/nullable
+    fields are omitted so the LLM doesn't fabricate values for them. The
+    helper handles enums (uses the first allowed value as the placeholder)
+    so the example is always actually-valid against the schema.
+    """
+    schema = expected_cls.model_json_schema()
+    required = schema.get("required", [])
+    props = schema.get("properties", {})
+
+    def placeholder(field_name: str, field_schema: dict) -> str | int | list | dict:
+        # Literal/Enum: use the first allowed value so the example validates.
+        enum = field_schema.get("enum")
+        if enum:
+            return enum[0]
+        t = field_schema.get("type")
+        if t == "integer":
+            return 1
+        if t == "number":
+            return 0.0
+        if t == "boolean":
+            return False
+        if t == "array":
+            return []
+        if t == "object":
+            return {}
+        # default: string
+        return f"<{field_name}>"
+
+    example_payload = {
+        name: placeholder(name, props.get(name, {})) for name in required
+    }
+    return json.dumps({"payload": example_payload})
 
 
 def _model() -> LitellmModel:
@@ -208,15 +263,29 @@ async def run_typed(
                 "%s ended without final_answer; retrying once with correction",
                 agent.name,
             )
+            # Build a literal JSON-shape hint from `expected_cls` so the
+            # LLM gets an unambiguous template — not just "call it now",
+            # but "call it like THIS". Verified live: Gemma subagents
+            # retry without this hint by emitting payload-as-string or
+            # missing-required-key variants that fail the @function_tool
+            # validator and trigger the same error in a loop.
+            shape_hint = _expected_shape_hint(expected_cls)
             correction = {
                 "role": "user",
                 "content": (
-                    "Your previous response ended WITHOUT calling "
-                    "`final_answer`. The work you did is preserved, but "
-                    "the run is INVALID until you finalise. Call "
-                    "`final_answer` NOW with a concise summary of what "
-                    "you accomplished — issue ONLY the tool call, no "
-                    "prose, no further research."
+                    "Your previous response ended WITHOUT a successful "
+                    "`final_answer` call (or `final_answer` was called "
+                    "with the wrong JSON shape and rejected by the tool "
+                    "validator). The work you did is preserved, but the "
+                    "run is INVALID until you finalise.\n\n"
+                    "Call `final_answer` NOW. The tool expects EXACTLY "
+                    "one argument named `payload`, whose value is a JSON "
+                    "object with the required keys. The literal shape "
+                    f"you MUST send is:\n\n  {shape_hint}\n\n"
+                    "Replace each <placeholder> with your real value. "
+                    "Do NOT omit the outer `payload` key. Do NOT wrap "
+                    "the payload as a string. Issue ONLY the tool call, "
+                    "no prose, no further research."
                 ),
             }
             retry_input = result.to_input_list() + [correction]

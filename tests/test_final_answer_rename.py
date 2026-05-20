@@ -333,6 +333,66 @@ async def test_run_typed_correction_message_appended_on_retry() -> None:
     assert "final_answer" in correction.get("content", ""), (
         f"correction must mention `final_answer` so the model gets a clear instruction; got {correction!r}"
     )
+    # The correction must also embed a literal JSON-shape hint so weak
+    # models that retry with the wrong wrapper get an unambiguous template
+    # (see _expected_shape_hint in braindb/agent/agent.py).
+    content = correction["content"]
+    assert '"payload"' in content, (
+        "correction must include the outer `payload` wrapper in its JSON template"
+    )
+    # For AgentAnswer the required key is `answer`; it must appear in the template.
+    assert '"answer"' in content, (
+        "correction's JSON template must include the AgentAnswer required key `answer`"
+    )
+
+
+# ------------------------------------------------------------------ #
+# _expected_shape_hint — literal JSON template injected into Layer 4   #
+# correction so the LLM gets an unambiguous shape on retry              #
+# ------------------------------------------------------------------ #
+
+
+@pytest.mark.parametrize(
+    "model, required_keys, must_contain_value",
+    [
+        # AgentAnswer: one required string field.
+        (AgentAnswer, ["answer"], None),
+        # MaintainerDecision: action + rationale. `action` is a Literal —
+        # the helper must pick one of its allowed values (not "<action>"),
+        # otherwise the example would fail Pydantic validation.
+        (MaintainerDecision, ["action", "rationale"], "attach"),
+        # WikiWriteResult: mode + body. mode is a Literal too.
+        (WikiWriteResult, ["mode", "body"], "create"),
+        # SubagentResult: just `result`.
+        (SubagentResult, ["result"], None),
+    ],
+    ids=["answer", "maintainer", "wiki", "subagent"],
+)
+def test_expected_shape_hint_covers_required_keys(model, required_keys, must_contain_value) -> None:
+    """The shape-hint helper must:
+    - Always wrap the inner dict in an outer `payload` key (the SDK's
+      @function_tool convention; weak models drop this on retry).
+    - Include every Pydantic-required field by name in the inner dict.
+    - For Literal/enum fields, pick an actually-valid value (not a
+      <placeholder> string), so the rendered example itself would
+      validate against the schema if sent verbatim.
+    """
+    import json as _json
+
+    from braindb.agent.agent import _expected_shape_hint
+
+    raw = _expected_shape_hint(model)
+    parsed = _json.loads(raw)
+    assert "payload" in parsed, f"shape hint must wrap in `payload`; got {raw!r}"
+    inner = parsed["payload"]
+    assert isinstance(inner, dict), f"`payload` value must be a dict; got {type(inner).__name__}"
+    for key in required_keys:
+        assert key in inner, f"required key {key!r} missing from hint {raw!r}"
+    if must_contain_value is not None:
+        assert must_contain_value in raw, (
+            f"hint for {model.__name__} must contain a real enum value "
+            f"({must_contain_value!r}); got {raw!r}"
+        )
 
 
 @pytest.mark.parametrize(
