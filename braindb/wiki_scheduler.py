@@ -34,7 +34,18 @@ WRITE_PARALLELISM = int(os.getenv("WIKI_WRITE_PARALLELISM", "3"))
 # WIKI_ENABLED=true (or 1/yes/on). Model-agnostic; orthogonal to any LLM
 # profile/provider.
 WIKI_ENABLED = os.getenv("WIKI_ENABLED", "false").lower() in ("1", "true", "yes", "on")
-AGENT_TIMEOUT = int(os.getenv("WIKI_AGENT_TIMEOUT", "600"))
+# HTTP read-timeout (seconds) the scheduler waits on a single /wiki/maintain
+# or /wiki/write call before its requests client gives up and moves on.
+# Bumped 600 → 1200 (10 → 20 min) after live observation on Qwen 27B AWQ-INT4
+# (vLLM, workstation): full-body wiki writes routinely run 6-15 min on this
+# model, so a 600s deadline at the scheduler caused the client to give up
+# WHILE the api kept working in the background — the write still committed,
+# but the scheduler couldn't see the completion in time to drain the queue
+# efficiently. With 1200s the client now waits long enough to see most
+# writes finish, while still surfacing genuinely-stuck jobs as failures
+# rather than blocking indefinitely. The api itself is not bounded by this
+# value; this knob only controls how patient the scheduler's HTTP client is.
+AGENT_TIMEOUT = int(os.getenv("WIKI_AGENT_TIMEOUT", "1200"))
 
 logging.basicConfig(
     level=logging.INFO,
