@@ -28,8 +28,16 @@ services:
       - "${API_PORT:-8000}:${API_PORT:-8000}"
     volumes:
       - .:/app
+    # Note: NO `--reload` in the api command. With the bind mount (`.:/app`)
+    # in dev, `--reload` causes uvicorn to restart on every .py edit, which
+    # interrupts in-flight LLM calls (the scheduler logs `Connection refused`
+    # during the ~20-30s embedding-model reload). Code changes are applied
+    # explicitly via `docker compose up -d --no-deps --force-recreate api` —
+    # the operator picks the moment. Anyone who wants dev-style live reload
+    # can override this command via `docker compose run` or a personal
+    # `docker-compose.override.yml`.
     command: >
-      sh -c "alembic upgrade head && uvicorn braindb.main:app --host 0.0.0.0 --port ${API_PORT:-8000} --reload"
+      sh -c "alembic upgrade head && uvicorn braindb.main:app --host 0.0.0.0 --port ${API_PORT:-8000}"
 
   watcher:
     build: .
