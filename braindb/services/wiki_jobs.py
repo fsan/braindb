@@ -38,6 +38,20 @@ FRESHNESS_MINUTES = int(os.getenv("WIKI_FRESHNESS_MINUTES", "30"))
 # never reclaimed. `attempts`+max_attempts already bound repeated failures.
 ASSIGNED_LEASE_MIN = int(os.getenv("WIKI_ASSIGNED_LEASE_MIN", "20"))
 
+# Per-wiki attach grouping — how long to wait before firing a writer on a
+# wiki that just received new attaches. Once the OLDEST pending attach for
+# a wiki is this old, the writer claims ALL pending attaches for that wiki
+# in a single batch (the within-tick batching at next_write_bucket()'s
+# second query already groups by target_wiki_id). Lets attaches accumulate
+# so the writer fires once per cooldown window instead of once per job —
+# directly addresses the "Dimitrios Koutsoumpos rewritten 8x in an hour"
+# pattern observed on Qwen. Bigger windows = lower LLM cost but slower
+# wiki freshness. Default 300s (5 min). Set to 0 to disable (revert to
+# the old "fire on every attach" behaviour). Self-limiting — no force-claim
+# valve needed because the bucket scoops up the WHOLE pending queue for
+# that wiki on each fire.
+ATTACH_COOLDOWN_SEC = int(os.getenv("WIKI_ATTACH_COOLDOWN_SECONDS", "300"))
+
 
 def _claimable(alias: str = "") -> str:
     """SQL predicate: a job is claimable if pending, OR assigned but its
@@ -339,13 +353,33 @@ def next_write_bucket(conn) -> dict | None:
     create (then created_at). The moment the maintainer emits a `consolidate`
     the writer drains it before creating/expanding more pages, so the wiki
     set converges before it grows.
+
+    Per-wiki cooldown on attach (ATTACH_COOLDOWN_SEC, default 300s = 5 min):
+    an attach seed becomes claimable only once its target wiki's oldest
+    pending attach is past the cooldown. Once eligible, the existing second
+    query below scoops up ALL pending attaches for that wiki (including the
+    ones inserted during the cooldown window) into one writer call. Net
+    effect: writer fires once per cooldown window per wiki instead of once
+    per job. `consolidate` and `create` paths are unaffected; the cooldown
+    is attach-only because attach is the only multi-job-per-wiki shape.
     """
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(
             f"""SELECT id, job_type, target_wiki_id, entity_ids::text[] AS entity_ids,
                       proposed_name, rationale, batch_id
-               FROM wiki_job
-               WHERE {_claimable()} AND job_type IN ('create','attach','consolidate')
+               FROM wiki_job j
+               WHERE {_claimable("j")}
+                 AND job_type IN ('create','attach','consolidate')
+                 AND (
+                     job_type <> 'attach'
+                     OR (
+                         SELECT MIN(created_at)
+                         FROM wiki_job
+                         WHERE target_wiki_id = j.target_wiki_id
+                           AND job_type = 'attach'
+                           AND status = 'pending'
+                     ) <= now() - make_interval(secs => {ATTACH_COOLDOWN_SEC})
+                 )
                ORDER BY CASE job_type WHEN 'consolidate' THEN 0
                                       WHEN 'attach'      THEN 1
                                       ELSE 2 END,
