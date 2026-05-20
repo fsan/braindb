@@ -106,6 +106,19 @@ class Settings(BaseSettings):
     # run, never spammed. Set to 0 to disable the nudge entirely.
     agent_countdown_threshold: int = 5
 
+    # Retry-with-correction when a run ends without `final_answer` (Layer 4
+    # of Stage C). If the model emits prose instead of calling the typed
+    # termination tool, instead of raising immediately we append a synthetic
+    # user-role correction message ("you ended without final_answer, call
+    # it now") to the existing conversation (via `RunResult.to_input_list()`)
+    # and re-invoke `Runner.run` ONCE with a small budget. If the retry
+    # produces `final_answer` -> return the typed payload (HTTP 200). If the
+    # retry ALSO fails -> raise `RuntimeError` (strict; no silent success
+    # on a model that refuses the contract even after correction).
+    # Bounded by `agent_retry_max_turns`; opt-out via setting to False.
+    agent_retry_on_missing_final: bool = True
+    agent_retry_max_turns: int = 3
+
     @property
     def resolved_agent_model(self) -> str:
         return self.agent_model or _LLM_PROFILES[self.llm_profile]["model"]

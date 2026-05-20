@@ -184,23 +184,79 @@ async def run_typed(
     )
     try:
         logger.info("Running typed query (%s): %s", agent.name, query[:160])
-        await Runner.run(starting_agent=agent, input=query, max_turns=turns, hooks=hooks)
+        result = await Runner.run(
+            starting_agent=agent, input=query, max_turns=turns, hooks=hooks,
+        )
         payload = slot.value
-        if not isinstance(payload, expected_cls):
-            # NOTE: this fires whenever `Runner.run` returns and no `submit_*`
-            # tool was called. The two real causes are (a) the model ended
-            # the run by emitting plain prose with no tool call (the SDK
-            # terminates naturally at that point) and (b) the SDK hit its
-            # own max_turns guard. The SDK raises `MaxTurnsExceeded`
-            # separately for (b), so by the time we get here it is almost
-            # always (a) — a model-discipline failure on the final turn.
-            raise RuntimeError(
-                f"{agent.name} did not call final_answer with a "
-                f"{expected_cls.__name__} (got {type(payload).__name__}). "
-                f"The run terminated without the typed final tool firing — "
-                f"the model likely ended with plain prose."
+        if isinstance(payload, expected_cls):
+            return payload
+
+        # The first attempt ended without `final_answer` firing. Most
+        # commonly the model emitted plain prose (a "fast finisher" /
+        # forgetter) — strict mode would raise here. But before giving
+        # up, Layer 4 gives the model exactly one chance to fix it:
+        # append a user-role correction message to the conversation it
+        # already produced (`result.to_input_list()`) and re-invoke
+        # `Runner.run` with a small budget. The correction is unambiguous
+        # — "you ended without `final_answer`, call it now". No parsing
+        # of the prose, no fallback that pretends success; we use the
+        # SDK's own conversation mechanism to tell the model what it did
+        # wrong, then either it complies on the retry (HTTP 200) or we
+        # raise (still strict).
+        if settings.agent_retry_on_missing_final:
+            logger.info(
+                "%s ended without final_answer; retrying once with correction",
+                agent.name,
             )
-        return payload
+            correction = {
+                "role": "user",
+                "content": (
+                    "Your previous response ended WITHOUT calling "
+                    "`final_answer`. The work you did is preserved, but "
+                    "the run is INVALID until you finalise. Call "
+                    "`final_answer` NOW with a concise summary of what "
+                    "you accomplished — issue ONLY the tool call, no "
+                    "prose, no further research."
+                ),
+            }
+            retry_input = result.to_input_list() + [correction]
+            retry_hooks = CountdownHooks(
+                max_turns=settings.agent_retry_max_turns,
+                threshold=settings.agent_countdown_threshold,
+                tool_name="final_answer",
+            )
+            await Runner.run(
+                starting_agent=agent,
+                input=retry_input,
+                max_turns=settings.agent_retry_max_turns,
+                hooks=retry_hooks,
+            )
+            payload = slot.value
+            if isinstance(payload, expected_cls):
+                logger.info(
+                    "%s recovered via final_answer-retry (correction worked)",
+                    agent.name,
+                )
+                return payload
+
+            # Retry also failed: model truly refuses the typed-final
+            # contract even when told explicitly what to do. That's a
+            # genuine model-discipline failure — raise loudly.
+            raise RuntimeError(
+                f"{agent.name} did not call final_answer even after a "
+                f"correction retry — model refuses the typed-final "
+                f"contract. Last final_output: "
+                f"{str(getattr(result, 'final_output', ''))[:200]}"
+            )
+
+        # Retry disabled (opt-out via settings): preserve the original
+        # strict-raise behaviour.
+        raise RuntimeError(
+            f"{agent.name} did not call final_answer with a "
+            f"{expected_cls.__name__} (got {type(payload).__name__}). "
+            f"The run terminated without the typed final tool firing — "
+            f"the model likely ended with plain prose."
+        )
     finally:
         release_slot(token)
 

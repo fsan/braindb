@@ -211,6 +211,130 @@ async def test_run_typed_returns_typed_payload_when_submitted() -> None:
 # ------------------------------------------------------------------ #
 
 
+# ------------------------------------------------------------------ #
+# Stage C / Layer 4 — retry-with-correction on prose-terminal         #
+# ------------------------------------------------------------------ #
+
+
+@pytest.mark.asyncio
+async def test_run_typed_retries_when_first_attempt_missing_final() -> None:
+    """When the first `Runner.run` ends without `final_answer` firing,
+    `run_typed` must inject a correction message and re-invoke
+    `Runner.run` ONCE. On the retry, if the model calls `final_answer`
+    via `record_submit`, the typed payload is returned and the caller
+    gets a success — no 500."""
+    fake_agent = mock.MagicMock(name="fake_agent")
+    fake_agent.name = "FakeAgent"
+    expected = AgentAnswer(answer="recovered after correction")
+    call_count = {"n": 0}
+
+    async def fake_runner_run(starting_agent, input, max_turns, **kwargs):
+        call_count["n"] += 1
+        result_mock = mock.MagicMock()
+        result_mock.to_input_list.return_value = [{"role": "user", "content": "prior context"}]
+        result_mock.final_output = "prose without final_answer call"
+        if call_count["n"] == 2:
+            # The retry: simulate the model now calling final_answer
+            run_state.record_submit(expected)
+        return result_mock
+
+    with mock.patch.object(agent_module.Runner, "run", new=fake_runner_run):
+        # Make sure retry is enabled
+        with mock.patch.object(agent_module.settings, "agent_retry_on_missing_final", True):
+            got = await agent_module.run_typed("query", fake_agent, AgentAnswer, max_turns=10)
+    assert got is expected
+    assert call_count["n"] == 2, "expected exactly one retry"
+
+
+@pytest.mark.asyncio
+async def test_run_typed_raises_when_retry_also_fails() -> None:
+    """If BOTH the first attempt AND the retry end without `final_answer`,
+    `run_typed` must still raise `RuntimeError`. No silent success on a
+    genuinely-broken model that refuses the contract even after
+    correction."""
+    fake_agent = mock.MagicMock(name="fake_agent")
+    fake_agent.name = "FakeAgent"
+    call_count = {"n": 0}
+
+    async def fake_runner_run(starting_agent, input, max_turns, **kwargs):
+        call_count["n"] += 1
+        result_mock = mock.MagicMock()
+        result_mock.to_input_list.return_value = []
+        result_mock.final_output = "still prose"
+        # Neither attempt calls record_submit — slot stays None.
+        return result_mock
+
+    with mock.patch.object(agent_module.Runner, "run", new=fake_runner_run):
+        with mock.patch.object(agent_module.settings, "agent_retry_on_missing_final", True):
+            with pytest.raises(RuntimeError, match="did not call final_answer|even after"):
+                await agent_module.run_typed("query", fake_agent, AgentAnswer, max_turns=10)
+    assert call_count["n"] == 2, "expected exactly one retry before giving up"
+
+
+@pytest.mark.asyncio
+async def test_run_typed_retry_disabled_via_setting() -> None:
+    """`agent_retry_on_missing_final=False` is the opt-out: when the first
+    attempt ends without `final_answer`, raise immediately — no retry."""
+    fake_agent = mock.MagicMock(name="fake_agent")
+    fake_agent.name = "FakeAgent"
+    call_count = {"n": 0}
+
+    async def fake_runner_run(starting_agent, input, max_turns, **kwargs):
+        call_count["n"] += 1
+        result_mock = mock.MagicMock()
+        result_mock.to_input_list.return_value = []
+        result_mock.final_output = "prose"
+        return result_mock
+
+    with mock.patch.object(agent_module.Runner, "run", new=fake_runner_run):
+        with mock.patch.object(agent_module.settings, "agent_retry_on_missing_final", False):
+            with pytest.raises(RuntimeError, match="did not call final_answer"):
+                await agent_module.run_typed("query", fake_agent, AgentAnswer, max_turns=10)
+    assert call_count["n"] == 1, "retry should NOT happen when setting is False"
+
+
+@pytest.mark.asyncio
+async def test_run_typed_correction_message_appended_on_retry() -> None:
+    """The retry call must pass `result.to_input_list() + [correction]` as
+    `input` to `Runner.run`, where `correction` is a user-role message
+    that explicitly references `final_answer` so the LLM gets an
+    unambiguous instruction (not a parse-the-prose hack)."""
+    fake_agent = mock.MagicMock(name="fake_agent")
+    fake_agent.name = "FakeAgent"
+    prior_items = [
+        {"role": "user", "content": "save this fact"},
+        {"role": "assistant", "content": "okay, doing the work..."},
+    ]
+    captured_inputs: list = []
+
+    async def fake_runner_run(starting_agent, input, max_turns, **kwargs):
+        captured_inputs.append(input)
+        result_mock = mock.MagicMock()
+        result_mock.to_input_list.return_value = prior_items
+        result_mock.final_output = "prose"
+        # No record_submit anywhere — to force the retry path AND fail again.
+        return result_mock
+
+    with mock.patch.object(agent_module.Runner, "run", new=fake_runner_run):
+        with mock.patch.object(agent_module.settings, "agent_retry_on_missing_final", True):
+            with pytest.raises(RuntimeError):
+                await agent_module.run_typed("save this fact", fake_agent, AgentAnswer, max_turns=10)
+
+    # First call gets the raw query string; second gets the prior history + a correction.
+    assert len(captured_inputs) == 2
+    assert captured_inputs[0] == "save this fact"
+    retry_input = captured_inputs[1]
+    assert isinstance(retry_input, list), f"retry input must be a message list, got {type(retry_input).__name__}"
+    assert retry_input[: len(prior_items)] == prior_items, "retry must preserve the prior conversation"
+    correction = retry_input[-1]
+    assert isinstance(correction, dict) and correction.get("role") == "user", (
+        f"correction message must be a user-role dict, got {correction!r}"
+    )
+    assert "final_answer" in correction.get("content", ""), (
+        f"correction must mention `final_answer` so the model gets a clear instruction; got {correction!r}"
+    )
+
+
 def test_typed_models_validate_strictly() -> None:
     """The @function_tool argument schemas are derived from these Pydantic
     models. Validation MUST reject malformed input — that's what protects
