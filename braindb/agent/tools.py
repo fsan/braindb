@@ -35,6 +35,7 @@ from braindb.services.keyword_service import (
     sync_keywords_for_entity,
 )
 from braindb.services.search import fuzzy_search, preview, slice_content
+from braindb.services import wiki_sections as ws
 from braindb.agent.run_state import record_submit
 from braindb.agent.schemas import (
     AgentAnswer,
@@ -861,6 +862,215 @@ async def delegate_to_subagent(task: str) -> str:
         return _err(f"subagent failed: {e}")
     finally:
         _call_depth -= 1
+
+
+# ====================================================================== #
+# WIKI SECTION EDITS — read/write slices of a wiki body (writer-only)    #
+# ====================================================================== #
+#
+# Wiki bodies can grow past the writer's context window. These tools let
+# the writer read just an outline (cheap) and edit one section at a time
+# instead of re-emitting the whole markdown blob every turn. Wired into
+# the writer agent only (see braindb/agent/agent.py).
+#
+# Strict-markers contract: tools error if the target body has no
+# `<!-- section:X -->` markers. Phase 0 confirmed all active wikis
+# already do.
+#
+# Optimistic concurrency via `wikis_ext.revision`: every read returns
+# the current revision; every write requires it as `expect_revision`. A
+# mismatch returns a "stale" ERROR string so the model re-reads instead
+# of stomping a concurrent edit (or its own stale mental state).
+
+import re as _re
+_SECTION_NAME_RE = _re.compile(r"[A-Za-z0-9_\-]+")
+
+
+@function_tool
+@_verbose("read_wiki_outline")
+async def read_wiki_outline(wiki_id: str) -> str:
+    """Outline of a wiki — section names + char counts + current revision.
+    Call before editing.
+
+    Args:
+        wiki_id: The wiki's entity UUID.
+    """
+    try:
+        with get_conn() as conn:
+            fetched = ws.fetch_wiki_for_section_op(conn, wiki_id)
+        if fetched is None:
+            return _err(f"wiki not found: {wiki_id}")
+        body, revision = fetched
+        _, sections = ws.parse_sections(body)
+        if not sections:
+            return _err(
+                f"wiki {wiki_id} body has no <!-- section:X --> markers "
+                f"(strict-markers contract violated; cannot edit)"
+            )
+        lines = [f"revision: {revision}", f"sections: {len(sections)}"]
+        for s in sections:
+            lines.append(f"  - {s.name}: {s.char_count}ch")
+        return "\n".join(lines)
+    except Exception as e:
+        return _err(str(e))
+
+
+@function_tool
+@_verbose("read_wiki_section")
+async def read_wiki_section(wiki_id: str, section_name: str) -> str:
+    """Read one section's content + the wiki's current revision token.
+
+    Args:
+        wiki_id: The wiki's entity UUID.
+        section_name: Section name as listed by read_wiki_outline.
+    """
+    try:
+        with get_conn() as conn:
+            fetched = ws.fetch_wiki_for_section_op(conn, wiki_id)
+        if fetched is None:
+            return _err(f"wiki not found: {wiki_id}")
+        body, revision = fetched
+        _, sections = ws.parse_sections(body)
+        match = next((s for s in sections if s.name == section_name), None)
+        if match is None:
+            names = ", ".join(s.name for s in sections) or "(none)"
+            return _err(f"section '{section_name}' not found. Existing: {names}")
+        return _truncate(
+            f"revision: {revision}\nsection: {match.name}\n"
+            f"content:\n{match.content}"
+        )
+    except Exception as e:
+        return _err(str(e))
+
+
+@function_tool
+@_verbose("edit_wiki_section")
+async def edit_wiki_section(
+    wiki_id: str,
+    section_name: str,
+    new_content: str,
+    expect_revision: int,
+) -> str:
+    """Replace one section's content. If section_name is new, appends a
+    fresh section at the end. Revision mismatch → returns ERROR: re-read
+    first.
+
+    Args:
+        wiki_id: The wiki's entity UUID.
+        section_name: Section to replace (or new section to append).
+            Use lowercase letters, digits, dashes, underscores only.
+        new_content: Full new content of the section (without the marker
+            line — the tool re-emits it).
+        expect_revision: Revision token from the last read on this wiki.
+    """
+    if not _SECTION_NAME_RE.fullmatch(section_name):
+        return _err(
+            f"invalid section_name '{section_name}': use only letters, "
+            f"digits, dashes, underscores"
+        )
+    try:
+        with get_conn() as conn:
+            fetched = ws.fetch_wiki_for_section_op(conn, wiki_id)
+            if fetched is None:
+                return _err(f"wiki not found: {wiki_id}")
+            body, current_rev = fetched
+            if current_rev != expect_revision:
+                return _err(
+                    f"stale revision: you passed {expect_revision}, "
+                    f"current is {current_rev}. Re-read the section first."
+                )
+            _, sections = ws.parse_sections(body)
+            if not sections:
+                return _err(
+                    f"wiki {wiki_id} body has no <!-- section:X --> markers; "
+                    f"strict-markers contract violated"
+                )
+            appended = all(s.name != section_name for s in sections)
+            new_body = ws.splice_section(body, section_name, new_content)
+            new_rev = ws.apply_section_write(conn, wiki_id, new_body, expect_revision)
+            log_activity(conn, "update", "wiki", wiki_id, details={
+                "op": "edit_wiki_section",
+                "section": section_name,
+                "appended": appended,
+                "revision": new_rev,
+            })
+        verb = "appended" if appended else "replaced"
+        return f"ok — section '{section_name}' {verb}. new revision: {new_rev}"
+    except ws.StaleRevisionError as e:
+        return _err(str(e))
+    except Exception as e:
+        return _err(str(e))
+
+
+@function_tool
+@_verbose("delete_wiki_section")
+async def delete_wiki_section(
+    wiki_id: str,
+    section_name: str,
+    expect_revision: int,
+) -> str:
+    """Remove a section. Revision mismatch → ERROR: re-read first.
+
+    Args:
+        wiki_id: The wiki's entity UUID.
+        section_name: Section to remove.
+        expect_revision: Revision token from the last read on this wiki.
+    """
+    try:
+        with get_conn() as conn:
+            fetched = ws.fetch_wiki_for_section_op(conn, wiki_id)
+            if fetched is None:
+                return _err(f"wiki not found: {wiki_id}")
+            body, current_rev = fetched
+            if current_rev != expect_revision:
+                return _err(
+                    f"stale revision: you passed {expect_revision}, "
+                    f"current is {current_rev}. Re-read first."
+                )
+            try:
+                new_body = ws.delete_section(body, section_name)
+            except KeyError:
+                _, sections = ws.parse_sections(body)
+                names = ", ".join(s.name for s in sections) or "(none)"
+                return _err(f"section '{section_name}' not found. Existing: {names}")
+            new_rev = ws.apply_section_write(conn, wiki_id, new_body, expect_revision)
+            log_activity(conn, "update", "wiki", wiki_id, details={
+                "op": "delete_wiki_section",
+                "section": section_name,
+                "revision": new_rev,
+            })
+        return f"ok — section '{section_name}' deleted. new revision: {new_rev}"
+    except ws.StaleRevisionError as e:
+        return _err(str(e))
+    except Exception as e:
+        return _err(str(e))
+
+
+@function_tool
+@_verbose("validate_wiki")
+async def validate_wiki(wiki_id: str) -> str:
+    """Check the wiki body grammar: section markers present, refs
+    well-formed, summary callout present. Returns 'ok' or one issue per
+    line.
+
+    Args:
+        wiki_id: The wiki's entity UUID.
+    """
+    try:
+        with get_conn() as conn:
+            fetched = ws.fetch_wiki_for_section_op(conn, wiki_id)
+        if fetched is None:
+            return _err(f"wiki not found: {wiki_id}")
+        body, revision = fetched
+        issues = ws.check_grammar(body)
+        if not issues:
+            return f"ok — revision: {revision}, no issues"
+        return (
+            f"revision: {revision}\nissues:\n"
+            + "\n".join(f"  - {i}" for i in issues)
+        )
+    except Exception as e:
+        return _err(str(e))
 
 
 # ====================================================================== #

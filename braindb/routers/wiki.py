@@ -272,12 +272,31 @@ async def wiki_write():
         .replace("%%CURRENT_BODY%%", old_body or "(none — create mode)")
         .replace("%%DUPLICATES%%", _dupes_block(dupes))
     )
+    # Capture pre-run revision on the target wiki for `attach` mode so we
+    # can detect whether the writer used the section-edit tools (each
+    # bumps `wikis_ext.revision` directly). The writer may then submit an
+    # empty `body` — section edits are the authoritative persistence
+    # path in that case. `create`/`consolidate` modes don't have a
+    # pre-determined target, so empty body is rejected there.
+    pre_revision: int | None = None
+    if mode == "attach" and bucket.get("target_wiki_id"):
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT revision FROM wikis_ext WHERE entity_id = %s::uuid",
+                    (bucket["target_wiki_id"],),
+                )
+                row = cur.fetchone()
+                if row:
+                    pre_revision = row[0]
+
     # Generous turns so the writer can recall_memory / view_tree / delegate a
     # subagent to research and verify before writing.
     # `run_typed` returns a SDK-validated WikiWriteResult, or raises if the
     # model never submitted — handled below like any agent failure
-    # (release + log + 5xx). The only extra guard is "non-empty body";
-    # everything else is the model's job (and validated by Pydantic).
+    # (release + log + 5xx). The only extra guard is "non-empty body OR
+    # section edits happened"; everything else is the model's job (and
+    # validated by Pydantic).
     try:
         res: WikiWriteResult = await run_typed(
             prompt, get_writer_agent(), WikiWriteResult, max_turns=30
@@ -288,12 +307,43 @@ async def wiki_write():
             disp = wiki_jobs.release_or_fail_jobs(conn, job_ids, f"agent error: {e}")
         return {"written": 0, "result": disp, "reason": str(e)}
 
+    used_section_edits = False
     if not (res.body or "").strip():
+        # Empty body — only valid in attach mode if section edits bumped
+        # the revision during the run. Otherwise the agent did nothing
+        # persistable and we fail the jobs.
+        if mode != "attach" or pre_revision is None:
+            with get_conn() as conn:
+                disp = wiki_jobs.release_or_fail_jobs(
+                    conn, job_ids,
+                    f"empty body returned in {mode} mode: "
+                    f"{res.model_dump_json()[:300]}",
+                )
+            return {"written": 0, "result": disp, "reason": "no body returned"}
         with get_conn() as conn:
-            disp = wiki_jobs.release_or_fail_jobs(
-                conn, job_ids, f"empty body returned: {res.model_dump_json()[:300]}")
-        return {"written": 0, "result": disp, "reason": "no body returned"}
-    new_body = res.body
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT e.content, w.revision
+                       FROM entities e JOIN wikis_ext w ON w.entity_id = e.id
+                       WHERE e.id = %s::uuid""",
+                    (bucket["target_wiki_id"],),
+                )
+                row = cur.fetchone()
+        if not row or row[1] == pre_revision:
+            with get_conn() as conn:
+                disp = wiki_jobs.release_or_fail_jobs(
+                    conn, job_ids,
+                    "empty body AND no section edits — agent did nothing",
+                )
+            return {"written": 0, "result": disp, "reason": "no edits"}
+        new_body = row[0]
+        used_section_edits = True
+        logger.info(
+            "writer used section-edit path: pre_rev=%s post_rev=%s body=%dch",
+            pre_revision, row[1], len(new_body),
+        )
+    else:
+        new_body = res.body
 
     # 3. Persist (one transaction). No content gate — the LLM's body is
     #    authoritative; we only snapshot (reversible) and reconcile additively.

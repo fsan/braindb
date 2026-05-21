@@ -42,12 +42,16 @@ from braindb.agent.tools import (
     delegate_to_subagent,
     delete_entity,
     delete_relation,
+    delete_wiki_section,
+    edit_wiki_section,
     generate_embeddings,
     get_entity,
     get_stats,
     ingest_file,
     list_entities,
     quick_search,
+    read_wiki_outline,
+    read_wiki_section,
     recall_memory,
     save_fact,
     save_rule,
@@ -59,6 +63,7 @@ from braindb.agent.tools import (
     submit_subagent,
     submit_wiki,
     update_entity,
+    validate_wiki,
     view_entity_relations,
     view_log,
     view_tree,
@@ -157,17 +162,22 @@ def _model() -> LitellmModel:
     )
 
 
-def _build(name: str, submit_tool) -> Agent:
+def _build(name: str, submit_tool, extra_tools: tuple = ()) -> Agent:
     """Build an agent. NOTE: no `output_type` — see module docstring. The
     structured contract lives on `submit_tool`'s argument schema, not on
-    the agent."""
+    the agent.
+
+    `extra_tools` lets a specific agent (currently only the writer) carry
+    role-specific tools (the wiki section-edit tools) without polluting
+    `_BASE_TOOLS` shared by all agents.
+    """
     set_tracing_disabled(disabled=True)
     agent = Agent(
         name=name,
         instructions=SYSTEM_PROMPT,
         model=_model(),
         model_settings=ModelSettings(),
-        tools=[*_BASE_TOOLS, submit_tool],
+        tools=[*_BASE_TOOLS, *extra_tools, submit_tool],
         tool_use_behavior=StopAtTools(stop_at_tool_names=["final_answer"]),
     )
     logger.info(
@@ -180,12 +190,26 @@ def _build(name: str, submit_tool) -> Agent:
 _cache: dict[str, Agent] = {}
 
 
-def _cached(key: str, name: str, submit_tool) -> Agent:
+def _cached(key: str, name: str, submit_tool, extra_tools: tuple = ()) -> Agent:
     a = _cache.get(key)
     if a is None:
-        a = _build(name, submit_tool)
+        a = _build(name, submit_tool, extra_tools=extra_tools)
         _cache[key] = a
     return a
+
+
+# Writer-only tools: section read/edit/delete + grammar validation. The
+# writer rewrites whole wiki bodies today; these let it edit one section
+# at a time so big wikis don't blow the context window. See
+# braindb/services/wiki_sections.py + plan
+# `feat/wikis-and-maintainer-agent-read-write-tools`.
+_WRITER_SECTION_TOOLS = (
+    read_wiki_outline,
+    read_wiki_section,
+    edit_wiki_section,
+    delete_wiki_section,
+    validate_wiki,
+)
 
 
 def get_agent() -> Agent:
@@ -198,7 +222,10 @@ def get_maintainer_agent() -> Agent:
 
 
 def get_writer_agent() -> Agent:
-    return _cached("writer", "BrainDB Wiki Writer", submit_wiki)
+    return _cached(
+        "writer", "BrainDB Wiki Writer", submit_wiki,
+        extra_tools=_WRITER_SECTION_TOOLS,
+    )
 
 
 def get_subagent() -> Agent:

@@ -225,13 +225,20 @@ class WikiWriteResult(BaseModel):
         ),
     )
     body: str = Field(
-        ...,
+        "",
         description=(
             "The COMPLETE markdown wiki page — the full document. Include "
             "the meta header, summary, disambiguation, every section, all "
             "[[ref:UUID]] citations, and the references section. This is "
             "what becomes the wiki entity's content; it replaces the prior "
-            "body wholesale (the prior version is auto-snapshotted)."
+            "body wholesale (the prior version is auto-snapshotted).\n\n"
+            "MAY be empty ONLY in `attach` mode AND only if you persisted "
+            "your changes via the section-edit tools "
+            "(`edit_wiki_section` / `delete_wiki_section`). In that case "
+            "the router detects the wiki's revision moved during your run "
+            "and skips the full-body write — your section edits are "
+            "already the authoritative content. For `create` and "
+            "`consolidate` modes this field MUST be non-empty."
         ),
     )
 

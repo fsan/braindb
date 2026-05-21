@@ -155,6 +155,50 @@ Relations are reconciled **additively** from your inline `[[ref:]]` tokens
 If you deliberately drop a source and want its relation gone, call
 `delete_relation` yourself — otherwise just stop citing it.
 
+## Section-edit path — for attach jobs on a big wiki
+
+When the existing body is large, re-emitting the whole thing in `body`
+can exhaust the context window. Use the section-edit tools instead —
+they let you read the OUTLINE only (cheap) and rewrite one section at
+a time, persisting each change immediately:
+
+- `read_wiki_outline(wiki_id)` — section names + char counts + the
+  current `revision` token. ALWAYS call this first.
+- `read_wiki_section(wiki_id, section_name)` — fetch one section's
+  content + revision. Read only the section(s) you need to touch.
+- `edit_wiki_section(wiki_id, section_name, new_content, expect_revision)`
+  — replace a section, or append a new one if `section_name` doesn't
+  exist yet. Pass the latest revision you read; on mismatch you get a
+  "stale revision" error and must re-read before retrying.
+- `delete_wiki_section(wiki_id, section_name, expect_revision)` — remove
+  a section.
+- `validate_wiki(wiki_id)` — check refs resolve and grammar invariants
+  hold. Run after a batch of edits to catch any broken `[[ref:UUID]]`.
+
+Section-edit grammar invariants when you author `new_content`:
+- Inline citations stay `[[ref:UUID]]` or `[[ref:UUID|display]]`
+  (grouped form `[[ref:UUID1], [ref:UUID2]]` is also tolerated).
+- DO NOT include the `<!-- section:NAME -->` marker yourself — the
+  tool emits it. Your `new_content` is the section's text only.
+- The HEADER (meta line, `# Title`, `> **Summary:**` /
+  `> **Disambiguation:**`) lives ABOVE the first section marker.
+  Section edits never touch the header — if the summary needs to
+  change, either re-edit the `overview` section to reflect the new
+  scope, or fall back to a full-body rewrite.
+- The "Preserve prior work" rule above applies PER SECTION: a
+  replaced section's `new_content` must include every still-valid
+  prior claim + `[[ref:UUID]]` from that section, plus the new
+  material — a superset, not a lossy summary.
+
+When finished, call `final_answer` with `body=""` (empty string) and
+the same `mode` as the job. The router detects that the wiki's
+revision advanced during your run and skips the full-body write —
+your section edits are the authoritative content. If you prefer to
+just rewrite the whole body for a small wiki, that path is unchanged
+— submit the full body in `body` as before. Don't mix the two on the
+same run: either use section tools and submit `body=""`, OR rewrite
+fully via `body`.
+
 ## Output — STRICT
 
 Finish by calling `final_answer` exactly once. Its argument is a typed
@@ -164,7 +208,10 @@ delimiters or raw JSON, you just fill the fields:
 - `mode` — `create`, `attach`, or `consolidate` (the mode of THIS job).
 - `body` — the COMPLETE markdown wiki page (the full document; the meta
   header, summary/disambiguation, every section, references — exactly what
-  used to go between the body delimiters).
+  used to go between the body delimiters). MAY be the empty string `""`
+  in `attach` mode if and only if you persisted your changes via the
+  section-edit tools; the router detects the revision delta and skips
+  the full-body write. REQUIRED non-empty for `create` and `consolidate`.
 - `canonical_no` — **consolidate mode only**: the NUMBER of the surviving
   wiki you chose, taken from the numbered "Duplicate wikis to consolidate"
   list above (an integer, e.g. `1`). Never an id. Leave it null for
