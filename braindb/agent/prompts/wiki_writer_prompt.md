@@ -191,13 +191,17 @@ Section-edit grammar invariants when you author `new_content`:
   material — a superset, not a lossy summary.
 
 When finished, call `final_answer` with `body=""` (empty string) and
-the same `mode` as the job. The router detects that the wiki's
-revision advanced during your run and skips the full-body write —
-your section edits are the authoritative content. If you prefer to
-just rewrite the whole body for a small wiki, that path is unchanged
-— submit the full body in `body` as before. Don't mix the two on the
-same run: either use section tools and submit `body=""`, OR rewrite
-fully via `body`.
+`mode="attach"`. The router detects that the wiki's revision advanced
+during your run and skips the full-body write — your section edits are
+the authoritative content. If you prefer to just rewrite the whole
+body for a small wiki, that path is unchanged — submit the full body
+in `body` as before. Don't mix the two on the same run: either use
+section tools and submit `body=""`, OR rewrite fully via `body`.
+
+**`body=""` is ATTACH MODE ONLY.** In `create` or `consolidate` mode
+the router REJECTS an empty body — those modes need the full new
+content in `body`. For consolidate, that means the complete merged
+survivor body (meta + summary + every section + references), period.
 
 ## Context handoff — when you're running out of room
 
@@ -206,8 +210,9 @@ If the system injects a "your context is filling up" nudge naming the
 model's window. You have two choices:
 
 - If your remaining work fits in **1-2 more turns**, finish cleanly:
-  call `final_answer` directly (with `body=""` if you used section
-  edits, or the full body otherwise).
+  call `final_answer` directly. Use `body=""` ONLY if you're in
+  `attach` mode AND used section edits; for `create` or `consolidate`
+  always submit the full body.
 - Otherwise, call `handoff_to_successor(progress_summary, remaining_work)`.
   A fresh agent with the SAME prompt and tools will continue from your
   brief. After your handoff call your run ends — the successor takes

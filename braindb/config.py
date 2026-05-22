@@ -147,11 +147,18 @@ class Settings(BaseSettings):
     # misbehaving model cannot thrash forever.
     #
     # Why a single absolute-token knob rather than a per-profile pct:
-    # Gemma local has `max_model_len=13000` (so 9000 ≈ 70%); Qwen and
-    # deepinfra have ~32K (so 9000 fires earlier than strictly needed,
-    # but never too late — safe). Avoids per-profile bookkeeping. Set to
-    # 0 to disable the handoff nudge entirely.
-    agent_writer_handoff_token_budget: int = 9000
+    # avoids per-profile bookkeeping. Tuned for the main production
+    # target (Qwen 27B at max_model_len=40960, so 20000 ≈ 49% — fires
+    # only when context is genuinely close to half-full). On the
+    # hosted-Gemma 32K path 20000 is also safe (~63%). On the local
+    # Gemma 13K path the budget is above the window so handoff never
+    # fires — that's fine because the small-context path fails at
+    # initial prompt construction long before the handoff can help.
+    # Default was 9000 during the Phase-3 dry run; observation showed
+    # that fired the handoff on routine consolidates that fit inline
+    # on Qwen, fragmenting work across successors unnecessarily. Set
+    # to 0 to disable the handoff nudge entirely.
+    agent_writer_handoff_token_budget: int = 20000
     agent_writer_handoff_max_depth: int = 3
 
     @property
