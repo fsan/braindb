@@ -43,7 +43,10 @@ focus your `recall_memory` budget on:
 - gaps the new members open up but the body doesn't yet cover.
 
 Be thorough where evidence is fresh or conflicting; be efficient
-where the body already has it right.
+where the body already has it right — **but every assigned MEMBER
+still needs to be cited at least once in the new body even if its
+content is already covered**, because the citation is what records
+the `summarises` relation (see "Citation is mechanical" below).
 
 Work in this exact order:
 
@@ -128,6 +131,18 @@ by inattention, brevity, or running low on output. If you are unsure whether
 a prior statement still holds, KEEP it (and, if needed, note the doubt with
 its ref) rather than silently omit it. A shorter page than before, with no
 resolution/evidence reason for what vanished, is a FAILED write.
+
+**Citation is mechanical, not editorial.** Every MEMBER in this job
+MUST appear as at least one `[[ref:UUID]]` citation in the new body
+— even when the existing prose already covers the same content. The
+citation is the *only* signal the system uses to record the
+`summarises` relation that links the member to this wiki. Without
+the citation the member stays orphaned, the maintainer re-flags it
+on the next tick, and the same attach is retried in a loop. If your
+section edits don't naturally cite a member, add a bullet for it in
+the `references` section before submitting. Whether you do section
+edits or a full rewrite, the rule is the same: **no assigned MEMBER
+may leave the run un-cited**.
 
 ## Recommended structure (consistency, not a hard gate)
 

@@ -418,13 +418,50 @@ async def wiki_write():
                     (bucket["target_wiki_id"],),
                 )
                 row = cur.fetchone()
-        if not row or row[1] == pre_revision:
+        if not row:
             with get_conn() as conn:
                 disp = wiki_jobs.release_or_fail_jobs(
                     conn, job_ids,
-                    "empty body AND no section edits — agent did nothing",
+                    "empty body AND wiki vanished",
                 )
-            return {"written": 0, "result": disp, "reason": "no edits"}
+            return {"written": 0, "result": disp, "reason": "wiki missing"}
+        if row[1] == pre_revision:
+            # No section edits happened. This is legitimate ONLY if every
+            # assigned member is already cited in the body — then there is
+            # nothing to write and we just need to run reconcile so the
+            # `summarises` relations catch up. If any member is missing
+            # from the body, the writer skipped real work — fail it.
+            body_now = row[0] or ""
+            cited = wiki_jobs.parse_refs(body_now)  # lower-cased set
+            missing = [m for m in member_ids if m.lower() not in cited]
+            if missing:
+                with get_conn() as conn:
+                    disp = wiki_jobs.release_or_fail_jobs(
+                        conn, job_ids,
+                        f"empty body AND no section edits AND "
+                        f"{len(missing)} member(s) not yet cited in body",
+                    )
+                return {"written": 0, "result": disp,
+                        "reason": "members un-cited"}
+            # All members cited — close the no-op cleanly and reconcile.
+            with get_conn() as conn:
+                rel = wiki_jobs.reconcile_summarises_additive(
+                    conn, bucket["target_wiki_id"], body_now)
+                wiki_jobs.finish_jobs(conn, job_ids, "done")
+                log_activity(conn, "wiki_write", "wiki",
+                             bucket["target_wiki_id"], details={
+                                 "mode": mode, "no_op": True,
+                                 "revision": pre_revision,
+                                 "members": len(member_ids), **rel,
+                             })
+            logger.info(
+                "writer no-op accepted: pre_rev=%s, all %d members already "
+                "cited; reconcile=%s",
+                pre_revision, len(member_ids), rel,
+            )
+            return {"written": 0, "wiki_id": bucket["target_wiki_id"],
+                    "mode": mode, "revision": pre_revision,
+                    "jobs": job_ids, "no_op": True, **rel}
         new_body = row[0]
         used_section_edits = True
         logger.info(
