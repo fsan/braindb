@@ -224,4 +224,4 @@ The HTTP response itself is unchanged (just `{"answer": "..."}`). Logs go to the
 
 - If the agent call fails (connection refused, 500, timeout): proceed WITHOUT memory. Don't retry, don't block the conversation.
 - If the answer mentions an ERROR: the agent tried but some tool failed. Carry on — use whatever partial information came back.
-- Agent calls can take 5-30 seconds (LLM + multi-turn loop). Subagent calls can take 30-90 seconds. That's normal.
+- Agent calls can take up to 10 minutes if the LLM provider is slow. Add `--max-time 600` to long curl calls.
