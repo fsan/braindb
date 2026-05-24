@@ -18,8 +18,10 @@ from braindb.schemas.entities import (
     RuleCreate, RuleRead, RuleUpdate,
     SourceCreate, SourceRead, SourceUpdate,
     ThoughtCreate, ThoughtRead, ThoughtUpdate,
+    WikiCreate, WikiRead, WikiUpdate,
 )
 from braindb.services.activity_log import log_activity
+from braindb.services.search import slice_content
 from braindb.services.embedding_service import get_embedding_service
 from braindb.services.keyword_service import ensure_keyword_entities, link_entity_to_keywords, sync_keywords_for_entity
 
@@ -70,13 +72,23 @@ ENTITY_SELECT = """
         re.always_on            AS always_on,
         re.category             AS category,
         re.priority             AS priority,
-        re.is_active            AS is_active
+        re.is_active            AS is_active,
+        -- wiki
+        we.canonical_name       AS canonical_name,
+        we.disambiguation       AS disambiguation,
+        we.language             AS wiki_language,
+        we.member_keyword_ids::text[] AS member_keyword_ids,
+        we.revision             AS revision,
+        we.last_synthesised_at  AS last_synthesised_at,
+        we.retired_at           AS retired_at,
+        we.redirect_to          AS redirect_to
     FROM entities e
     LEFT JOIN thoughts_ext te    ON te.entity_id = e.id AND e.entity_type = 'thought'
     LEFT JOIN facts_ext fe       ON fe.entity_id = e.id AND e.entity_type = 'fact'
     LEFT JOIN sources_ext se     ON se.entity_id = e.id AND e.entity_type = 'source'
     LEFT JOIN datasources_ext de ON de.entity_id = e.id AND e.entity_type = 'datasource'
     LEFT JOIN rules_ext re       ON re.entity_id = e.id AND e.entity_type = 'rule'
+    LEFT JOIN wikis_ext we       ON we.entity_id = e.id AND e.entity_type = 'wiki'
     WHERE e.id = %s
 """
 
@@ -116,6 +128,17 @@ def _flatten(row: dict) -> dict:
         base.update(file_path=row["file_path"], url=row["ds_url"], content_hash=row["content_hash"], word_count=row["word_count"], language=row["language"])
     elif etype == "rule":
         base.update(always_on=row["always_on"], category=row["category"], priority=row["priority"], is_active=row["is_active"])
+    elif etype == "wiki":
+        base.update(
+            canonical_name=row["canonical_name"],
+            disambiguation=row["disambiguation"],
+            language=row["wiki_language"],
+            member_keyword_ids=row["member_keyword_ids"] or [],
+            revision=row["revision"],
+            last_synthesised_at=row["last_synthesised_at"],
+            retired_at=row["retired_at"],
+            redirect_to=row["redirect_to"],
+        )
     return base
 
 
@@ -282,14 +305,43 @@ def create_rule(body: RuleCreate):
         return _flatten(_fetch(conn, eid))
 
 
+@router.post("/wikis", response_model=WikiRead, status_code=201)
+def create_wiki(body: WikiCreate):
+    with get_conn() as conn:
+        eid = _insert_entity(conn, "wiki", body)
+        with conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO wikis_ext
+                   (entity_id, canonical_name, disambiguation, language, member_keyword_ids)
+                   VALUES (%s, %s, %s, %s, %s::uuid[])""",
+                (str(eid), body.canonical_name, body.disambiguation, body.language,
+                 [str(k) for k in body.member_keyword_ids]),
+            )
+        return _flatten(_fetch(conn, eid))
+
+
 # ------------------------------------------------------------------ #
 # READ                                                                #
 # ------------------------------------------------------------------ #
 
 @router.get("/{entity_id}")
-def get_entity(entity_id: UUID):
+def get_entity(
+    entity_id: UUID,
+    offset: int = Query(default=0, ge=0),
+    limit: int | None = Query(default=None, ge=1),
+):
+    """Full single-entity read. Pass offset/limit to page a large `content`
+    without flooding the caller — response then includes `content_meta`
+    {total_chars, offset, returned, next_offset}. Default (no offset/limit)
+    returns the full body, unchanged."""
     with get_conn() as conn:
-        return _flatten(_or_404(_fetch(conn, entity_id)))
+        ent = _flatten(_or_404(_fetch(conn, entity_id)))
+    if offset == 0 and limit is None:
+        return ent
+    chunk, meta = slice_content(ent.get("content"), offset, limit)
+    ent["content"] = chunk
+    ent["content_meta"] = meta
+    return ent
 
 
 # ------------------------------------------------------------------ #
@@ -421,6 +473,39 @@ def update_rule(entity_id: UUID, body: RuleUpdate):
         data = body.model_dump(exclude_unset=True)
         _update_base(conn, entity_id, data)
         _update_ext(conn, "rules_ext", entity_id, ["always_on", "category", "priority", "is_active"], data)
+        return _flatten(_fetch(conn, entity_id))
+
+
+@router.patch("/wikis/{entity_id}", response_model=WikiRead)
+def update_wiki(entity_id: UUID, body: WikiUpdate):
+    with get_conn() as conn:
+        row = _or_404(_fetch(conn, entity_id))
+        if row["entity_type"] != "wiki":
+            raise HTTPException(400, "Entity is not a wiki")
+        data = body.model_dump(exclude_unset=True)
+        _update_base(conn, entity_id, data)
+        # wikis_ext: UUID / UUID[] fields need explicit handling, so do not
+        # route through the generic _update_ext.
+        ext_fields = ("canonical_name", "disambiguation", "language", "member_keyword_ids",
+                      "revision", "last_synthesised_at", "retired_at", "redirect_to")
+        ext = {k: v for k, v in data.items() if k in ext_fields and v is not None}
+        if ext:
+            assignments, values = [], []
+            for k, v in ext.items():
+                if k == "member_keyword_ids":
+                    assignments.append(f"{k} = %s::uuid[]")
+                    values.append([str(x) for x in v])
+                elif k == "redirect_to":
+                    assignments.append(f"{k} = %s")
+                    values.append(str(v))
+                else:
+                    assignments.append(f"{k} = %s")
+                    values.append(v)
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"UPDATE wikis_ext SET {', '.join(assignments)} WHERE entity_id = %s",
+                    values + [str(entity_id)],
+                )
         return _flatten(_fetch(conn, entity_id))
 
 

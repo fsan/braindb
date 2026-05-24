@@ -5,6 +5,39 @@ The API runs at **http://localhost:8000**.
 
 ---
 
+## ⚠ TOOL PRIORITY — read this first, it overrides habit
+
+BrainDB's entire value is the **graph + embeddings + ranking**. Recall and
+understanding must go through the sophisticated retrieval, never a flat SQL
+`SELECT`.
+
+1. **`POST /api/v1/memory/context`** (multi-query) — the default for ALL
+   recall, discovery, disambiguation, "what do we know about X". BOTH
+   the fuzzy and the embedding pathways are **keyword-mediated**: the
+   query is matched against keyword-entity content (via pg_trgm) and
+   keyword embeddings, then entities surface via `tagged_with`. A
+   two-level diversity quota (per-search-term + per-keyword, geometric
+   decay) keeps results balanced + graph traversal + temporal decay +
+   `final_rank`.
+2. **`POST /api/v1/agent/query`** (ask it to *delegate to a subagent* for
+   anything multi-step) — research/investigation that needs several hops.
+3. `GET /api/v1/entities…`, `/memory/tree/<id>`, `/entities/<id>/relations` —
+   targeted structure lookups.
+4. **`POST /api/v1/memory/sql` — exception ONLY.** A flat SELECT throws away
+   embeddings, graph and ranking. Use it solely for a specific
+   structured/aggregate question (counts, GROUP BY, activity-log joins) the
+   above genuinely cannot express. **Never** for recall, discovery,
+   similarity, or understanding. If you're using SQL to *find* or *understand*
+   something, you're doing it wrong — use `/memory/context`.
+
+**Previews vs full read:** all multi-item calls return short previews
+(~1K/item; a clipped one ends `--truncated … get_entity("<id>")`). Read a
+full body only by id: `GET /api/v1/entities/{id}`. For a large body, page it
+with `?offset=&limit=` (follow `content_meta.next_offset`) or delegate it to a
+subagent — never pull whole documents into context.
+
+---
+
 ## At the Start of Every Session
 
 Before doing any work, consult your memory:
@@ -13,16 +46,18 @@ Before doing any work, consult your memory:
 # 1. Get always-on rules (behavioral guidelines)
 curl -s http://localhost:8000/api/v1/memory/rules
 
-# 2. Get context — use multi-query for better coverage
+# 2. Get context — use multi-query with NARROW queries for better coverage
 curl -s -X POST http://localhost:8000/api/v1/memory/context \
   -H "Content-Type: application/json" \
-  -d '{"queries": ["user profile background expertise", "<what you are working on>"], "max_depth": 3, "max_results": 15}'
+  -d '{"queries": ["user-profile", "Dimitrios", "<one broader topic angle>"], "max_depth": 3}'
 ```
 
 The context response gives you `items` (ranked memories) and `always_on_rules` (always injected).
 Trust higher `final_rank` items more. Check `depth` — depth 0 is a direct match, 1-3 are graph-connected.
 
 Multi-query runs each query independently, merges seeds (keeping the best score per entity), then does one graph expansion on the combined set. Use it to cover multiple angles in a single call.
+
+**Query strategy**: prefer multiple **narrow** queries (single keywords / bare names) alongside one broader phrase, NOT a single long sentence. Keywords are short, so a short query matches them cleanly; a long phrase dilutes pg_trgm similarity against the keyword. The per-search-term diversity quota reserves slots for each query you pass, so a bare name like `"Petros"` will always surface its specific facts even when paired with broader semantic angles. `max_results` defaults to 30 — leave it unless you have a reason.
 
 If results seem weak, retry with reformulated queries (up to 2 times).
 
@@ -156,7 +191,7 @@ When debugging the agent: set `AGENT_VERBOSE=true` in `.env` and watch `docker l
 
 ## Important Notes
 
-- `.env` contains real DB credentials and provider API keys (`DEEPINFRA_API_KEY`, `NVIDIA_NIM_API_KEY`, etc.) — **never commit it**, it is in `.gitignore`. Active provider is picked by `LLM_PROFILE` (see `braindb/config.py::_LLM_PROFILES`).
+- `.env` contains real DB credentials and provider API keys (`DEEPINFRA_API_KEY`, `NVIDIA_NIM_API_KEY`, etc.) — **never commit it**, it is in `.gitignore`. Active provider is picked by `LLM_PROFILE` (see `braindb/config.py::_LLM_PROFILES`). `LLM_PROFILE=deepinfra` (model `google/gemma-4-31B-it`) is the recommended starting point — fast, cheap, validated end-to-end; the `vllm_*` profiles are for advanced/offline use and need a workstation GPU + SSH tunnel.
 - Always-on rules (priority 100, `always_on: true`) are returned on every `/memory/context` call
 - `notes` field on any entity or relation is for running commentary — append observations over time
 - Keywords are stored as both a `TEXT[]` column on the entity AND as separate keyword entities linked via `tagged_with` relations (the keyword entities carry the embeddings for semantic search)

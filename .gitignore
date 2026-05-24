@@ -36,3 +36,6 @@ Thumbs.db
 data/sources/*
 !data/sources/.gitkeep
 !data/sources/README.md
+
+# Wiki review exports — generated, read-only inspection output
+data/wiki_review/

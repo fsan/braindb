@@ -85,24 +85,68 @@ If the final curl returns `{"status":"ok"}`, you're live.
 
 ---
 
+## TOOL PRIORITY (read this first)
+
+BrainDB's power is the graph + embeddings + ranking. Use it; do not fall back
+to flat SQL.
+
+1. **`POST /api/v1/memory/context`** (multi-query) — the default for ALL
+   recall, discovery, and understanding. BOTH the fuzzy and embedding
+   pathways are **keyword-mediated** (the query matches against keyword
+   entities, entities surface via `tagged_with`). A two-level diversity
+   quota (per-search-term + per-keyword halving) keeps results
+   balanced. Then graph traversal + decay + ranking.
+2. **`POST /api/v1/agent/query` with "delegate to a subagent…"** — for
+   multi-step investigation/disambiguation; the agent researches and returns a
+   summary.
+3. `GET /api/v1/entities…`, `GET /api/v1/memory/tree/<id>`,
+   `GET /api/v1/entities/<id>/relations` — targeted structure lookups.
+4. **Wikis** — first-class entity type, curated topic pages assembled by an
+   internal maintainer + writer pipeline from facts/thoughts tagged with the
+   same keyword. To browse: `GET /api/v1/entities?entity_type=wiki`. Full body:
+   `GET /api/v1/entities/<id>`. Wikis also surface naturally in `/memory/context`.
+   Write paths are documented in the WIKIS section below.
+5. **`POST /api/v1/memory/sql` — exception only.** A flat SELECT has no
+   embeddings/graph/ranking. Use it solely for a specific structured/aggregate
+   question (counts, GROUP BY, activity-log joins) the above cannot express.
+   **Never** for recall, discovery, similarity, or understanding.
+
+If you're about to use `/memory/sql` to *find* or *understand* something,
+stop — that's a `/memory/context` (or delegated `/agent/query`) job.
+
+### Previews vs full body
+
+`/memory/context` (and `/memory/search`, `GET /entities`) return **short
+previews** per item (~1K); a clipped item ends with
+`--truncated (N more) -- full body: get_entity("<id>")`. That's intended —
+decide from previews, then read only what you need:
+
+- Full single entity: `GET /api/v1/entities/{id}`.
+- Large body: page it — `GET /api/v1/entities/{id}?offset=0&limit=8000`, then
+  follow `content_meta.next_offset` until it is `null`. For big documents,
+  prefer `POST /api/v1/agent/query` with "delegate to a subagent to read and
+  distil entity <id>" so the heavy content never enters this conversation.
+
 ## RECALL — Before Responding
 
 ### Step 1: Formulate targeted queries
 
 Analyze the user's message. Extract the **core topics** that need memory context. Create **multiple targeted queries** — do NOT paste the raw user message.
 
-**Important**: Use terms that match how entities are STORED, not natural language questions. The search uses trigram similarity + full-text matching. Specific terms that would appear in stored content work best. Vague queries with stop words ("everything about X") will return nothing.
+**Query strategy** — BrainDB's retrieval is keyword-mediated, so:
 
-Include likely keywords in your queries: `user-profile`, `expertise`, `project-decision`, `user-preference`.
+- Prefer **multiple narrow queries** (single keywords / bare names) over one long sentence. Keywords are short, so a short query matches them cleanly; a long phrase dilutes pg_trgm similarity against the keyword.
+- The per-search-term quota reserves slots for EACH query you pass, so adding a bare keyword as one of your queries guarantees it surfaces (it doesn't compete with the broader phrases).
+- Use terms that match how entities are STORED. Common keyword conventions: `user-profile`, `expertise`, `project-decision`, `user-preference`.
 
-Examples:
+Examples (narrow + one broader angle, mixed):
 
 | User says | Queries |
 |-----------|---------|
-| "help me refactor this React component" | `["user-profile React frontend expertise", "user-preference code style refactoring"]` |
-| "let's work on the IR pipeline" | `["investor-relations IR scraping architecture", "user-preference deployment workflow"]` |
-| (new conversation, no specific topic) | `["user-profile expertise role background", "user-preference working style"]` |
-| "what's the best way to deploy this?" | `["deployment infrastructure project-decision", "user-preference production services"]` |
+| "help me refactor this React component" | `["user-profile", "React", "user-preference code style refactoring"]` |
+| "let's work on the IR pipeline" | `["investor-relations", "IR", "deployment workflow"]` |
+| (new conversation, no specific topic) | `["user-profile", "expertise", "working style"]` |
+| "what's the best way to deploy this?" | `["deployment", "infrastructure", "production services"]` |
 
 Always include a `"user-profile"` query on the first message of a conversation — you need to know who you're talking to.
 
@@ -111,8 +155,10 @@ Always include a `"user-profile"` query on the first message of a conversation �
 ```bash
 curl -s -X POST http://localhost:8000/api/v1/memory/context \
   -H "Content-Type: application/json" \
-  -d '{"queries": ["query1", "query2"], "max_depth": 3, "max_results": 15}'
+  -d '{"queries": ["narrow1", "narrow2", "one broader phrase"], "max_depth": 3}'
 ```
+
+`max_results` defaults to 30 — leave it unless you specifically want fewer.
 
 ### Step 3: Evaluate results and retry if weak
 
@@ -140,13 +186,32 @@ Let recalled facts inform your response. **Do NOT announce** "I found in memory 
 
 ## SAVE — After Responding
 
-After each interaction, evaluate what you learned. **Be proactive and thorough about saving.**
+After each interaction, evaluate what you learned. The policy is **RECALL → ASK → SAVE.**
 
-### Saving philosophy
+### Saving philosophy — always ASK the user first
 
-- **Save everything worth remembering.** Don't skip something because it seems minor — save it with lower importance. A fact you didn't need is harmless. A fact you forgot is a missed opportunity.
-- **Create THOUGHTS proactively.** After each interaction, form inferences: what does this tell you about the user's expertise? Their working style? Their priorities? Thoughts are cheap and enrich the graph.
-- **Create RELATIONS for every new entity.** Connect it to existing entities found during recall. Multiple relations per entity is ideal — the graph's value comes from density.
+Always recall first. If what the user shared is **net-new** (not already in
+`/memory/context`), **ASK the user** before saving:
+
+> "I haven't seen this before — should I save it as a fact / thought / rule?
+> (I'd tag it with keywords X, Y; importance Z.)"
+
+Only persist after the user confirms. The user has the final say on what
+becomes long-term memory. Auto-saves without confirmation dilute signal and
+accumulate junk; user-confirmed memory is higher-signal and traceable.
+
+**Exception** — behavioural rules the user explicitly stated as rules ("from
+now on, always X"; "never do Y") can be saved without an extra confirmation —
+they already said it. Just surface the action: "Saving that as a rule."
+
+Once the user agrees:
+
+- **Create RELATIONS for every new entity.** Connect it to existing entities
+  found during recall. Multiple relations per entity is ideal — the graph's
+  value comes from density.
+- **Thoughts (your own inferences about the user) — ASK before persisting,
+  same as facts.** A thought is still memory; the user should agree it
+  belongs there.
 
 ### What to save as
 
@@ -295,9 +360,14 @@ curl -s "http://localhost:8000/api/v1/memory/log?since=2026-04-08T00:00:00Z"
 
 Use this to answer "when did I learn this?" or "what was I working on yesterday?"
 
-### Read-only SQL — power queries
+### Read-only SQL — EXCEPTION tool, aggregations only
 
-For ad-hoc exploration and aggregations the standard endpoints don't cover. Only `SELECT` and `WITH` queries are allowed; 5s timeout; 1000 row limit.
+⚠ Not a recall/discovery tool (see TOOL PRIORITY at the top). A flat SELECT
+throws away embeddings, graph and ranking — everything BrainDB is good at.
+Use it **only** for a specific structured/aggregate question the dedicated
+endpoints cannot express (counts, GROUP BY, activity-log joins). For finding
+or understanding anything, use `/memory/context` or a delegated `/agent/query`.
+Only `SELECT` and `WITH` queries are allowed; 5s timeout; 1000 row limit.
 
 ```bash
 # Count entities by source
@@ -316,7 +386,94 @@ curl -s -X POST http://localhost:8000/api/v1/memory/sql \
   -d '{"query": "SELECT l.timestamp, l.operation, e.content FROM activity_log l JOIN entities e ON e.id = l.entity_id ORDER BY l.timestamp DESC LIMIT 20"}'
 ```
 
-Prefer the dedicated endpoints for normal operations. Use SQL when you need something unusual.
+Reiterate: `/memory/context` (+ delegated `/agent/query`) is the default for
+everything. `/memory/sql` is the rare exception for true aggregations only.
+
+---
+
+## WIKIS — Auto-Curated Topic Pages
+
+Wikis are canonical topic pages BrainDB assembles automatically from
+facts/thoughts tagged with the same keyword. An internal maintainer runs
+every 60s, scans for orphan keywords (a keyword with members but no wiki
+yet), and decides per-orphan: **attach** (the topic already has a wiki),
+**create** (mint a new one), **consolidate** (merge duplicates), or
+**skip** (not a wiki-worthy subject). Approved suggestions then become wiki
+bodies via the wiki writer. You usually don't need to do anything — saving
+facts with consistent keywords is enough; the pipeline materialises the
+wikis on its own.
+
+### Recall — browse and read wikis
+
+```bash
+# List all wikis (most recent first), previews only
+curl -s "http://localhost:8000/api/v1/entities?entity_type=wiki&limit=50"
+
+# Read a wiki body in full
+curl -s http://localhost:8000/api/v1/entities/<UUID>
+```
+
+Wikis surface in `/memory/context` automatically — you don't have to ask
+for them separately when doing topic recall.
+
+### Write — indirect (default): let the pipeline decide
+
+1. Save your facts with the right keyword (the subject's bare name —
+   `keywords=["Sawki"]`, not `["Sawki the employee"]`).
+2. (Optional) Nudge the pipeline so the maintainer evaluates the new
+   keyword *now* rather than on the next scheduler tick:
+
+```bash
+curl -s -X POST http://localhost:8000/api/v1/wiki/cron
+```
+
+The cron is **idempotent** (safe to call any time). It enqueues triage
+jobs for orphan keywords; the scheduler then runs maintain → write on
+its next 60s tick. The maintainer can still decide to **skip** the
+orphan if the subject isn't worth a wiki (e.g. an infrastructural
+keyword) — that's expected and not an error.
+
+Inspect what's pending:
+
+```bash
+curl -s "http://localhost:8000/api/v1/wiki/jobs?status=pending&limit=20"
+```
+
+### Write — direct (power user, rare): bypass the pipeline
+
+When you need full control over the body and you know exactly what the
+wiki should say, you can create one directly:
+
+```bash
+curl -s -X POST http://localhost:8000/api/v1/wikis \
+  -H "Content-Type: application/json" \
+  -d '{
+    "content": "# Sawki\n\nFull markdown body here...",
+    "canonical_name": "Sawki",
+    "disambiguation": "Team member, distinct from other people with similar names",
+    "language": "en",
+    "member_keyword_ids": ["<keyword-uuid>"],
+    "keywords": ["Sawki", "Egypt", "Petros"],
+    "importance": 0.7,
+    "source": "user-stated"
+  }'
+```
+
+⚠ This **bypasses the maintainer's dedup logic.** If a wiki for that
+subject already exists, you'll create a duplicate that someone (or the
+next `consolidate` maintainer decision) has to clean up. Prefer the
+indirect path unless you specifically know why the pipeline can't do
+what you need.
+
+`member_keyword_ids` requires existing keyword UUIDs. Find them via:
+
+```bash
+curl -s "http://localhost:8000/api/v1/entities?entity_type=keyword&content=<name>"
+```
+
+We intentionally do NOT document `POST /wiki/maintain` or `POST
+/wiki/write` here — they're claim-based (take no target) and only make
+sense as scheduler-internal steps.
 
 ---
 

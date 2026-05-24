@@ -210,7 +210,49 @@ class RuleUpdate(BaseModel):
 
 
 # ------------------------------------------------------------------ #
+# WIKI                                                                #
+# ------------------------------------------------------------------ #
+
+class WikiCreate(EntityBase):
+    canonical_name: str = Field(..., min_length=1, max_length=500)
+    disambiguation: str | None = None
+    language: str = "en"
+    member_keyword_ids: list[UUID] = Field(default_factory=list)
+
+
+class WikiRead(EntityRead):
+    entity_type: Literal["wiki"] = "wiki"
+    canonical_name: str
+    disambiguation: str | None
+    language: str
+    member_keyword_ids: list[UUID] = Field(default_factory=list)
+    revision: int
+    last_synthesised_at: datetime | None = None
+    retired_at: datetime | None = None
+    redirect_to: UUID | None = None
+
+
+class WikiUpdate(BaseModel):
+    title: str | None = None
+    content: str | None = None
+    summary: str | None = None
+    keywords: list[str] | None = None
+    importance: float | None = Field(default=None, ge=0.0, le=1.0)
+    source: str | None = None
+    notes: str | None = None
+    metadata: dict[str, Any] | None = None
+    canonical_name: str | None = Field(default=None, min_length=1, max_length=500)
+    disambiguation: str | None = None
+    language: str | None = None
+    member_keyword_ids: list[UUID] | None = None
+    revision: int | None = None
+    last_synthesised_at: datetime | None = None
+    retired_at: datetime | None = None
+    redirect_to: UUID | None = None
+
+
+# ------------------------------------------------------------------ #
 # Generic entity read (union) used in list endpoints                  #
 # ------------------------------------------------------------------ #
 
-AnyEntityRead = ThoughtRead | FactRead | SourceRead | DatasourceRead | RuleRead
+AnyEntityRead = ThoughtRead | FactRead | SourceRead | DatasourceRead | RuleRead | WikiRead

@@ -34,7 +34,15 @@ from braindb.services.keyword_service import (
     link_entity_to_keywords,
     sync_keywords_for_entity,
 )
-from braindb.services.search import fuzzy_search
+from braindb.services.search import fuzzy_search, preview, slice_content
+from braindb.services import wiki_sections as ws
+from braindb.agent.run_state import record_handoff, record_submit
+from braindb.agent.schemas import (
+    AgentAnswer,
+    MaintainerDecision,
+    SubagentResult,
+    WikiWriteResult,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -100,15 +108,42 @@ def _verbose(name: str):
 
 @function_tool
 @_verbose("recall_memory")
-async def recall_memory(queries: list[str], max_results: int = 15) -> str:
+async def recall_memory(
+    queries: list[str],
+    max_results: int = settings.recall_default_max_results,
+) -> str:
     """Search BrainDB memory with multiple natural language queries.
     Runs fuzzy + fulltext + keyword embedding search, merges with geometric mean,
     traverses the graph up to 3 hops, applies temporal decay.
     Use this as the primary recall tool.
 
+    QUERY STRATEGY — IMPORTANT for high-recall on narrow subjects:
+
+    BrainDB indexes via short keyword entities. A 1-word query like
+    "Petros" matches the keyword "Petros" cleanly (similarity ~1.0). A
+    long phrase like "Petros person identity profile" matches the same
+    keyword at much lower similarity (~0.4) because pg_trgm dilutes
+    when comparing short keywords to long query strings.
+
+    Therefore: prefer MULTIPLE narrow queries over one long phrase. The
+    sweet spot for a focused subject is:
+      - one or two SINGLE-KEYWORD queries (the names you care about),
+      - plus 1-2 broader semantic phrases for adjacent context.
+
+    Examples:
+      GOOD:  ["Petros", "Selonda Saronikos fish farm", "Dimitrios manager"]
+      BAD:   ["Petros person identity profile relation to Dimitris"]
+
+    Each query you provide gets a reserved share of the top results
+    (per-search-term quota), so adding the bare keyword as one of your
+    queries GUARANTEES that subject surfaces — it doesn't compete with
+    the broader phrases.
+
     Args:
-        queries: List of search queries (use multiple angles for better coverage).
-        max_results: Max items to return (1-100, default 15).
+        queries: List of search queries. Prefer 2-4 short focused queries
+            over one long phrase. Include the bare keyword(s) of the
+            subject you're investigating as standalone queries.
+        max_results: Max items to return (1-100, default 30).
     """
     try:
         req = ContextRequest(queries=queries, max_results=max_results)
@@ -315,11 +350,22 @@ async def save_rule(
 
 @function_tool
 @_verbose("get_entity")
-async def get_entity(entity_id: str) -> str:
-    """Fetch a single entity by ID (returns JSON blob with all fields).
+async def get_entity(entity_id: str, offset: int = 0, limit: Optional[int] = None) -> str:
+    """Fetch ONE entity by ID — the full-content read (recall/list only give
+    previews; come here to read a thing fully).
+
+    For a LARGE body, page it with offset/limit instead of pulling it whole:
+    the response includes `content_meta` {total_chars, offset, returned,
+    next_offset}. Loop `next_offset` until null. To avoid polluting your own
+    context, hand each slice to `delegate_to_subagent` ("process THIS slice…")
+    and aggregate — never load a huge document into your main context.
 
     Args:
         entity_id: UUID of the entity.
+        offset: start char of the content slice (default 0).
+        limit: max chars of this slice (clamped to the server slice max).
+               If offset and limit are both omitted, the full body is returned
+               (legacy behaviour, unchanged).
     """
     try:
         with get_conn() as conn:
@@ -331,7 +377,14 @@ async def get_entity(entity_id: str) -> str:
         d = dict(row)
         d.pop("embedding", None)
         d.pop("search_vector", None)
-        return _truncate(json.dumps(d, default=str, indent=2))
+        if offset == 0 and limit is None:
+            return _truncate(json.dumps(d, default=str, indent=2))
+        # Explicit slice request → return exactly that slice + paging meta,
+        # NOT re-clipped by _truncate (slice is already bounded by SLICE_MAX).
+        chunk, meta = slice_content(d.get("content"), offset, limit)
+        d["content"] = chunk
+        d["content_meta"] = meta
+        return json.dumps(d, default=str, indent=2)
     except Exception as e:
         return _err(str(e))
 
@@ -382,7 +435,7 @@ async def list_entities(
             lines.append(
                 f"[{r['entity_type']}] imp={r['importance']} src={r.get('source', '-')}\n"
                 f"  id: {r['id']}\n"
-                f"  content: {r['content']}\n"
+                f"  content: {preview(r['content'], r['id'])}\n"
                 f"  keywords: {r.get('keywords', [])}"
             )
         return _truncate("\n".join(lines))
@@ -632,7 +685,9 @@ async def search_sql(query: str) -> str:
                 columns = [d[0] for d in cur.description] if cur.description else []
                 rows = cur.fetchmany(1000)
             log_activity(conn, "sql_query", details={"query": query[:500], "rows": len(rows)})
-        result = {"columns": columns, "rows": [[str(v) if v is not None else None for v in r] for r in rows], "row_count": len(rows)}
+        result = {"columns": columns,
+                  "rows": [[preview(v) if v is not None else None for v in r] for r in rows],
+                  "row_count": len(rows)}
         return _truncate(json.dumps(result, default=str, indent=2))
     except Exception as e:
         return _err(str(e))
@@ -776,7 +831,7 @@ async def delegate_to_subagent(task: str) -> str:
     tool outputs. The subagent has access to all the same BrainDB tools.
 
     Write a clear, self-contained task description — the subagent doesn't see
-    your prior context. End by telling it to call submit_result with a summary.
+    your prior context. End by telling it to call final_answer with a summary.
 
     Args:
         task: A self-contained task description for the subagent.
@@ -787,20 +842,21 @@ async def delegate_to_subagent(task: str) -> str:
     _call_depth += 1
     try:
         # Local imports to avoid circular dependency on agent.py
-        from agents import Runner
-        from braindb.agent.agent import create_braindb_agent
+        from braindb.agent.agent import get_subagent, run_typed
         from braindb.config import settings
 
         logger.info("Subagent starting: %s", task[:200])
-        subagent = create_braindb_agent()
-        result = await Runner.run(
-            starting_agent=subagent,
-            input=task,
+        # run_typed isolates the subagent's submit slot from ours (its own
+        # `last_submit.set(None)` token + reset in `finally`), so we cannot
+        # leak the subagent's SubagentResult into the parent's run_typed.
+        payload: SubagentResult = await run_typed(
+            task,
+            get_subagent(),
+            SubagentResult,
             max_turns=settings.agent_subagent_max_turns,
         )
-        answer = str(result.final_output)
         logger.info("Subagent completed.")
-        return _truncate(answer)
+        return _truncate(payload.result)
     except Exception as e:
         logger.exception("Subagent failed")
         return _err(f"subagent failed: {e}")
@@ -809,15 +865,322 @@ async def delegate_to_subagent(task: str) -> str:
 
 
 # ====================================================================== #
+# WIKI SECTION EDITS — read/write slices of a wiki body (writer-only)    #
+# ====================================================================== #
+#
+# Wiki bodies can grow past the writer's context window. These tools let
+# the writer read just an outline (cheap) and edit one section at a time
+# instead of re-emitting the whole markdown blob every turn. Wired into
+# the writer agent only (see braindb/agent/agent.py).
+#
+# Strict-markers contract: tools error if the target body has no
+# `<!-- section:X -->` markers. Phase 0 confirmed all active wikis
+# already do.
+#
+# Optimistic concurrency via `wikis_ext.revision`: every read returns
+# the current revision; every write requires it as `expect_revision`. A
+# mismatch returns a "stale" ERROR string so the model re-reads instead
+# of stomping a concurrent edit (or its own stale mental state).
+
+import re as _re
+_SECTION_NAME_RE = _re.compile(r"[A-Za-z0-9_\-]+")
+
+
+@function_tool
+@_verbose("read_wiki_outline")
+async def read_wiki_outline(wiki_id: str) -> str:
+    """Outline of a wiki — section names + char counts + current revision.
+    Call before editing.
+
+    Args:
+        wiki_id: The wiki's entity UUID.
+    """
+    try:
+        with get_conn() as conn:
+            fetched = ws.fetch_wiki_for_section_op(conn, wiki_id)
+        if fetched is None:
+            return _err(f"wiki not found: {wiki_id}")
+        body, revision = fetched
+        _, sections = ws.parse_sections(body)
+        if not sections:
+            return _err(
+                f"wiki {wiki_id} body has no <!-- section:X --> markers "
+                f"(strict-markers contract violated; cannot edit)"
+            )
+        lines = [f"revision: {revision}", f"sections: {len(sections)}"]
+        for s in sections:
+            lines.append(f"  - {s.name}: {s.char_count}ch")
+        return "\n".join(lines)
+    except Exception as e:
+        return _err(str(e))
+
+
+@function_tool
+@_verbose("read_wiki_section")
+async def read_wiki_section(wiki_id: str, section_name: str) -> str:
+    """Read one section's content + the wiki's current revision token.
+
+    Args:
+        wiki_id: The wiki's entity UUID.
+        section_name: Section name as listed by read_wiki_outline.
+    """
+    try:
+        with get_conn() as conn:
+            fetched = ws.fetch_wiki_for_section_op(conn, wiki_id)
+        if fetched is None:
+            return _err(f"wiki not found: {wiki_id}")
+        body, revision = fetched
+        _, sections = ws.parse_sections(body)
+        match = next((s for s in sections if s.name == section_name), None)
+        if match is None:
+            names = ", ".join(s.name for s in sections) or "(none)"
+            return _err(f"section '{section_name}' not found. Existing: {names}")
+        return _truncate(
+            f"revision: {revision}\nsection: {match.name}\n"
+            f"content:\n{match.content}"
+        )
+    except Exception as e:
+        return _err(str(e))
+
+
+@function_tool
+@_verbose("edit_wiki_section")
+async def edit_wiki_section(
+    wiki_id: str,
+    section_name: str,
+    new_content: str,
+    expect_revision: int,
+) -> str:
+    """Replace one section's content. If section_name is new, appends a
+    fresh section at the end. Revision mismatch → returns ERROR: re-read
+    first.
+
+    Args:
+        wiki_id: The wiki's entity UUID.
+        section_name: Section to replace (or new section to append).
+            Use lowercase letters, digits, dashes, underscores only.
+        new_content: Full new content of the section (without the marker
+            line — the tool re-emits it).
+        expect_revision: Revision token from the last read on this wiki.
+    """
+    if not _SECTION_NAME_RE.fullmatch(section_name):
+        return _err(
+            f"invalid section_name '{section_name}': use only letters, "
+            f"digits, dashes, underscores"
+        )
+    try:
+        with get_conn() as conn:
+            fetched = ws.fetch_wiki_for_section_op(conn, wiki_id)
+            if fetched is None:
+                return _err(f"wiki not found: {wiki_id}")
+            body, current_rev = fetched
+            if current_rev != expect_revision:
+                return _err(
+                    f"stale revision: you passed {expect_revision}, "
+                    f"current is {current_rev}. Re-read the section first."
+                )
+            _, sections = ws.parse_sections(body)
+            if not sections:
+                return _err(
+                    f"wiki {wiki_id} body has no <!-- section:X --> markers; "
+                    f"strict-markers contract violated"
+                )
+            appended = all(s.name != section_name for s in sections)
+            new_body = ws.splice_section(body, section_name, new_content)
+            new_rev = ws.apply_section_write(conn, wiki_id, new_body, expect_revision)
+            log_activity(conn, "update", "wiki", wiki_id, details={
+                "op": "edit_wiki_section",
+                "section": section_name,
+                "appended": appended,
+                "revision": new_rev,
+            })
+        verb = "appended" if appended else "replaced"
+        return f"ok — section '{section_name}' {verb}. new revision: {new_rev}"
+    except ws.StaleRevisionError as e:
+        return _err(str(e))
+    except Exception as e:
+        return _err(str(e))
+
+
+@function_tool
+@_verbose("delete_wiki_section")
+async def delete_wiki_section(
+    wiki_id: str,
+    section_name: str,
+    expect_revision: int,
+) -> str:
+    """Remove a section. Revision mismatch → ERROR: re-read first.
+
+    Args:
+        wiki_id: The wiki's entity UUID.
+        section_name: Section to remove.
+        expect_revision: Revision token from the last read on this wiki.
+    """
+    try:
+        with get_conn() as conn:
+            fetched = ws.fetch_wiki_for_section_op(conn, wiki_id)
+            if fetched is None:
+                return _err(f"wiki not found: {wiki_id}")
+            body, current_rev = fetched
+            if current_rev != expect_revision:
+                return _err(
+                    f"stale revision: you passed {expect_revision}, "
+                    f"current is {current_rev}. Re-read first."
+                )
+            try:
+                new_body = ws.delete_section(body, section_name)
+            except KeyError:
+                _, sections = ws.parse_sections(body)
+                names = ", ".join(s.name for s in sections) or "(none)"
+                return _err(f"section '{section_name}' not found. Existing: {names}")
+            new_rev = ws.apply_section_write(conn, wiki_id, new_body, expect_revision)
+            log_activity(conn, "update", "wiki", wiki_id, details={
+                "op": "delete_wiki_section",
+                "section": section_name,
+                "revision": new_rev,
+            })
+        return f"ok — section '{section_name}' deleted. new revision: {new_rev}"
+    except ws.StaleRevisionError as e:
+        return _err(str(e))
+    except Exception as e:
+        return _err(str(e))
+
+
+@function_tool
+@_verbose("validate_wiki")
+async def validate_wiki(wiki_id: str) -> str:
+    """Check the wiki body grammar: section markers present, refs
+    well-formed, summary callout present. Returns 'ok' or one issue per
+    line.
+
+    Args:
+        wiki_id: The wiki's entity UUID.
+    """
+    try:
+        with get_conn() as conn:
+            fetched = ws.fetch_wiki_for_section_op(conn, wiki_id)
+        if fetched is None:
+            return _err(f"wiki not found: {wiki_id}")
+        body, revision = fetched
+        issues = ws.check_grammar(body)
+        if not issues:
+            return f"ok — revision: {revision}, no issues"
+        return (
+            f"revision: {revision}\nissues:\n"
+            + "\n".join(f"  - {i}" for i in issues)
+        )
+    except Exception as e:
+        return _err(str(e))
+
+
+# ====================================================================== #
+# CONTEXT HANDOFF — end this run, successor continues (writer-only)      #
+# ====================================================================== #
+#
+# Called by the writer when it gets a context-near-full nudge from
+# `CountdownHooks` and decides remaining work doesn't fit. The router's
+# writer wrapper (braindb/routers/wiki.py) detects the handoff slot was
+# filled and spawns a successor agent — same prompt, same tools, fresh
+# context, seeded with the brief.
+#
+# The tool ALSO parks a placeholder `WikiWriteResult` via `record_submit`
+# so `run_typed`'s typed-final contract is satisfied — the placeholder
+# is never the authoritative output; the wrapper reads the handoff slot
+# instead. This avoids any change to `run_typed`'s shape.
+
+@function_tool
+@_verbose("handoff_to_successor")
+async def handoff_to_successor(progress_summary: str, remaining_work: str) -> str:
+    """End this run early; a successor with the SAME prompt and tools
+    will continue from your brief. Use when you've been nudged about
+    context approaching the limit AND remaining work doesn't fit in 1-2
+    turns.
+
+    Args:
+        progress_summary: Tools you've called, key findings, and any
+            ACTIVE revision tokens (for the wiki you've been editing).
+            The successor only sees this — be precise.
+        remaining_work: The concrete next tool call(s) the successor
+            must make — name wikis, section names, current revisions.
+            Example: "Call read_wiki_section(wiki_id='abc', section_name='timeline')
+            with expect_revision=15, then edit_wiki_section(...) with the
+            new timeline content merging facts from member fact-id xyz."
+    """
+    record_handoff(progress_summary, remaining_work)
+    # Park a placeholder WikiWriteResult so run_typed's typed-final
+    # contract is satisfied. mode/body are intentionally minimal — the
+    # router consults the handoff slot first when this run ends. The
+    # writer's StopAtTools list includes `handoff_to_successor`, so
+    # the loop halts cleanly after this returns.
+    record_submit(WikiWriteResult(mode="attach", body=""))
+    return "handoff registered; this run is ending — successor will continue from your brief"
+
+
+# ====================================================================== #
 # FINAL TOOL — stops the loop                                            #
 # ====================================================================== #
 
-@function_tool
-@_verbose("submit_result")
-async def submit_result(answer: str) -> str:
-    """Submit the final answer to the query. Call this exactly once when you're done.
+# Convention (absolute): the run finishes ONLY by calling `final_answer`,
+# and its argument is ALWAYS a typed Pydantic model — never a loose string.
+# `@function_tool` validates the LLM's call args against the model BEFORE
+# invoking the body, so `payload` is guaranteed-valid inside each function.
+#
+# strict_mode=False: critical. The default `strict_mode=True` activates
+# OpenAI structured-outputs strict JSON schema, which forces EVERY
+# property of the embedded Pydantic model into the schema's `required`
+# list — overriding Pydantic's own view that fields with `= None` or
+# `default_factory=...` are optional. On `MaintainerDecision` and
+# `WikiWriteResult`, that inflation makes the LLM emit args that pass
+# Pydantic but fail the over-strict schema, producing endless
+# "Invalid JSON input: 1 validation error" loops the Layer 4 retry
+# can't escape (verified live on deepinfra/Gemma against the wiki
+# maintainer). Turning strict_mode off makes the LLM-visible schema
+# match Pydantic's required list exactly; Pydantic still validates the
+# parsed args inside the tool body, so the typed-final contract is
+# unchanged — we just stop demanding the model emit fields it doesn't
+# need.
+# There is one typed variant per agent purpose; every variant keeps the
+# name "final_answer" so prompts and `StopAtTools(["final_answer"])`
+# stay generic.
+#
+# Each variant parks the validated payload into the per-Task ContextVar
+# (see braindb/agent/run_state.py) so `run_typed` can hand it back
+# typed. The returned "ok" string is irrelevant — we never read
+# `result.final_output`; `StopAtTools` only needs the loop to stop.
+#
+# Why a ContextVar instead of `output_type=<Model>` on the Agent:
+# `output_type` makes the SDK pass `response_format: json_schema` on
+# EVERY LLM turn (not just the final one), which steers weaker models to
+# satisfy the schema on turn 1 and never call tools. The side-channel
+# capture keeps middle turns free while still delivering a typed final.
 
-    Args:
-        answer: The full response to send back to the caller.
-    """
-    return answer
+@function_tool(name_override="final_answer", strict_mode=False)
+@_verbose("final_answer")
+async def submit_answer(payload: AgentAnswer) -> str:
+    """Submit the final answer. Call this exactly once when you're done."""
+    record_submit(payload)
+    return "ok"
+
+
+@function_tool(name_override="final_answer", strict_mode=False)
+@_verbose("final_answer")
+async def submit_maintainer(payload: MaintainerDecision) -> str:
+    """Submit the maintainer decision. Call this exactly once when you're done."""
+    record_submit(payload)
+    return "ok"
+
+
+@function_tool(name_override="final_answer", strict_mode=False)
+@_verbose("final_answer")
+async def submit_wiki(payload: WikiWriteResult) -> str:
+    """Submit the finished wiki. Call this exactly once when you're done."""
+    record_submit(payload)
+    return "ok"
+
+
+@function_tool(name_override="final_answer", strict_mode=False)
+@_verbose("final_answer")
+async def submit_subagent(payload: SubagentResult) -> str:
+    """Submit the delegated task result. Call this exactly once when you're done."""
+    record_submit(payload)
+    return "ok"

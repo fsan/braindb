@@ -3,7 +3,7 @@ import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from braindb.routers import agent, entities, memory, relations
+from braindb.routers import agent, entities, memory, relations, wiki
 from braindb.services.embedding_service import get_embedding_service
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -25,6 +25,7 @@ app.include_router(entities.router)
 app.include_router(relations.router)
 app.include_router(memory.router)
 app.include_router(agent.router)
+app.include_router(wiki.router)
 
 
 @app.on_event("startup")

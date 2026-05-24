@@ -2,7 +2,7 @@
 
 A memory database and REST API for LLM agents. Store and retrieve thoughts, facts, sources, documents, and behavioral rules — with fuzzy + semantic keyword search, graph traversal up to 3 hops, temporal decay, and always-on rule injection. Built to be driven externally by an LLM via HTTP calls.
 
-It also ships with **its own internal agent** (OpenAI Agents SDK + LiteLLM with pluggable providers — DeepInfra by default, NIM / others via config) so external callers can talk to BrainDB in plain English via a single endpoint instead of orchestrating individual API calls.
+It also ships with **its own internal agent** (OpenAI Agents SDK + LiteLLM with pluggable providers — **DeepInfra is the recommended default**, with NIM / local vLLM / others available via config) so external callers can talk to BrainDB in plain English via a single endpoint instead of orchestrating individual API calls.
 
 ---
 
@@ -33,7 +33,7 @@ Relations connect any two entities with `relation_type`, `relevance_score`, `imp
 
 ## Setup
 
-BrainDB runs as two Docker services — `api` and `watcher` — against an **external** PostgreSQL you provide. The whole setup is six steps.
+BrainDB runs as three Docker services — `api`, `watcher` (auto-ingests files), and `wiki_scheduler` (auto-maintains wikis) — against an **external** PostgreSQL you provide. The two sidecars are hands-off: you never call the pipeline by hand. The whole setup is six steps.
 
 ### 1. Prerequisites
 
@@ -72,11 +72,11 @@ Any reachable hostname/IP works — the connecting user just needs network acces
 
 ### 4. Pick an LLM provider (for the internal agent)
 
-The agent talks to any LiteLLM-supported backend. BrainDB ships with two profiles pre-configured: **DeepInfra** (default, fast, paid) and **NVIDIA NIM** (free tier, can be flaky).
+The agent talks to any LiteLLM-supported backend. **Recommended for new users: `deepinfra` with `google/gemma-4-31B-it`** — fast (5–30s per agent call), cheap, validated end-to-end on the wiki/maintainer/writer pipeline. `nim` is a free-tier fallback (occasionally flaky). The `vllm_*` profiles run a local model on your own GPU workstation — useful for offline / cost-free experiments, but require a running vLLM server reachable from the docker network (typically via SSH tunnel).
 
 In `.env`:
 ```
-LLM_PROFILE=deepinfra        # or 'nim' — default is 'deepinfra'
+LLM_PROFILE=deepinfra        # recommended default
 DEEPINFRA_API_KEY=...        # if profile=deepinfra — get from https://deepinfra.com/
 NVIDIA_NIM_API_KEY=...       # if profile=nim       — get from https://build.nvidia.com/
 ```
@@ -144,16 +144,19 @@ See [BRAINDB_GUIDE.md](BRAINDB_GUIDE.md) for full API reference with curl exampl
 
 ## How Retrieval Works
 
-`POST /api/v1/memory/context` is the main endpoint:
+`POST /api/v1/memory/context` is the main endpoint. **Keywords are the indexing layer** — both the fuzzy and the embedding pathways match the query against keyword-entity content / embeddings, then entities surface via `tagged_with` edges. A keyword tagged on many entities is the hub; you don't need explicit `elaborates` / `refers_to` edges for an entity to be findable, as long as it has the right keywords.
 
-1. **Multi-query search** — pass `queries: ["topic1", "topic2"]` to search multiple angles at once. Each query runs 4-tier scoring (AND fulltext, OR fulltext fallback, content trigram, title trigram), seeds are merged keeping the best score per entity.
-2. **Keyword embeddings** — query terms are also matched against keyword entity embeddings (Qwen3-Embedding-0.6B, 1024-dim, cosine similarity). Text and embedding scores are combined via geometric mean (with a configurable penalty when only one signal matches).
-3. **Graph traversal** up to 3 hops via relations, relevance fading: `1.0 → 0.6 → 0.3`
-4. **Temporal decay** — memories fade over time, strengthen on access
-5. **Final rank** = `combined_score × effective_importance × accumulated_relevance`
-6. **Always-on rules** injected regardless of query
+1. **Multi-query search** — pass `queries: ["topic1", "topic2"]` to search multiple angles at once. Each query is matched against keyword entities by both pg_trgm trigram similarity AND query-embedding-vs-keyword-embedding cosine similarity; results are merged with the geometric mean (configurable `missing_signal_penalty` when only one signal fires).
+2. **Per-search-term reservation (L1 diversity quota)** — each query you pass gets a guaranteed share of the result slots filled from THAT query's own top-ranked entities. Bare-keyword queries (`"Petros"`) reliably surface specific facts even when paired with broader semantic angles.
+3. **Per-keyword reservation (L2 diversity quota)** — each dominant matched keyword gets a halving slot allowance (50% / 25% / 12.5% ..., floor 1). Stops one popular hub keyword (e.g. `user-profile` tagging 100 facts) from monopolising top-N.
+4. **Graph traversal** up to 3 hops via relations, relevance fading: `1.0 → 0.6 → 0.3`.
+5. **Temporal decay** — memories fade over time, strengthen on access.
+6. **Final rank** = `combined_score × effective_importance × accumulated_relevance`. The LLM-visible cap stays at the caller's `max_results` (default 30); the scoring pool internally considers up to 500 candidates per query so narrow keywords are never excluded before they're evaluated.
+7. **Always-on rules** injected regardless of query.
 
 Single `query` (string) still works for backward compatibility.
+
+**Query strategy** — prefer multiple short queries (a bare keyword + 1–2 broader phrases) over one long sentence. The keyword "Petros" matches the `Petros` keyword cleanly; the phrase "Petros person identity profile" matches the SAME keyword at a much lower score because pg_trgm dilutes against a longer query.
 
 ---
 
@@ -166,19 +169,26 @@ curl -X POST http://localhost:8000/api/v1/agent/query \
   -H "Content-Type: application/json" \
   -d '{"query":"What do you know about the user role and recent projects?"}'
 
-# {"answer": "The user is ...", "max_turns": 15}
+# {"answer": "The user is ...", "max_turns": 20}
 ```
 
-The agent has 21 tools — every single BrainDB endpoint plus `delegate_to_subagent` (which spawns a fresh agent in its own context for focused deep work) and `submit_result` (which ends the loop).
+The agent has 21 tools — every single BrainDB endpoint plus `delegate_to_subagent` (which spawns a fresh agent in its own context for focused deep work) and `final_answer` (which ends the loop with a validated typed payload).
 
 **LLM provider — pluggable via `.env`**:
 
-`LLM_PROFILE` selects the backend. Profiles are defined in [braindb/config.py](braindb/config.py) (`_LLM_PROFILES`) — currently `deepinfra` (default, model `google/gemma-4-31B-it`) and `nim` (NVIDIA NIM, model `google/gemma-4-31b-it`). Each profile is a model-prefix + env-var pair; adding a new one is a dict entry.
+`LLM_PROFILE` selects the backend. Profiles are defined in [braindb/config.py](braindb/config.py) (`_LLM_PROFILES`):
+
+- **`deepinfra` — recommended default.** Model `google/gemma-4-31B-it`. Fast (5–30s per agent call), cheap, validated end-to-end.
+- `nim` — NVIDIA NIM, model `google/gemma-4-31b-it`. Free tier, occasionally flaky.
+- `vllm_workstation` / `vllm_workstation_qwen` / `vllm_workstation_gemma` — local vLLM running on your own GPU (advanced / offline; needs the server reachable from the docker network, usually via SSH tunnel).
+
+Each profile is a model-prefix + env-var pair; adding a new one is a dict entry.
 
 ```
-LLM_PROFILE=deepinfra         # or nim — default is deepinfra
+LLM_PROFILE=deepinfra         # or nim / vllm_workstation / vllm_workstation_qwen
 DEEPINFRA_API_KEY=...         # required if profile=deepinfra (https://deepinfra.com/)
 NVIDIA_NIM_API_KEY=...        # required if profile=nim (https://build.nvidia.com/)
+VLLM_API_KEY=...              # optional, only if local vLLM is started with --api-key
 AGENT_MODEL=                  # optional: override the profile's default model
 ```
 
@@ -270,6 +280,33 @@ curl -X POST http://localhost:8000/api/v1/entities/datasources/ingest \
 
 It's idempotent by content hash — re-calling with the same bytes returns 200 (existing) instead of 201 (new).
 
+## Autonomous Wiki Maintenance
+
+The second always-on sidecar, `wiki_scheduler`, makes the knowledge graph
+self-organise into human-readable **wiki pages** with **zero manual steps** —
+the same hands-off model as file ingestion. It loops in the background:
+discovers entities not yet covered by a wiki, lets the in-house agent decide
+where each belongs (attach to an existing wiki / create a new one / consolidate
+duplicates / skip), and the writer agent researches and writes/maintains each
+page, keeping it grounded and self-correcting. Started automatically by
+`docker compose up -d` (like `watcher`); just watch it work:
+
+```bash
+docker logs braindb_wiki_scheduler -f   # the autonomous loop
+docker logs braindb_api -f              # the agent doing the work
+```
+
+You do **not** drive this by hand. The `POST /api/v1/wiki/{cron,maintain,write}`
+endpoints exist for **debugging / inspection only** — normal operation is the
+sidecar. (Optional read-only review: `docker compose exec api python -m
+braindb.tools.export_wikis` writes a markdown snapshot of every wiki +
+provenance to `data/wiki_review/`.)
+
+**Cost control:** like the `watcher`, this sidecar drives the LLM
+automatically. To run without it, bring the stack up excluding the service or
+scale it to 0 (`docker compose up -d --scale wiki_scheduler=0`), exactly as
+you would for the watcher; or point `LLM_PROFILE` at a local model.
+
 ## Stack
 
 - Python 3.12 + FastAPI + psycopg2 (sync, no ORM)
@@ -277,4 +314,4 @@ It's idempotent by content hash — re-calling with the same bytes returns 200 (
 - Alembic migrations
 - `sentence-transformers` + `Qwen/Qwen3-Embedding-0.6B` for keyword embeddings
 - `openai-agents[litellm]` + LiteLLM for the internal agent (DeepInfra / NIM / others pluggable via `LLM_PROFILE`)
-- Docker Compose — `api` + `watcher` services, external PostgreSQL
+- Docker Compose — `api` + `watcher` + `wiki_scheduler` services, external PostgreSQL

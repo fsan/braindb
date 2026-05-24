@@ -15,6 +15,10 @@ RELATION_TYPES = Literal[
     "is_example_of",
     "challenges",
     "tagged_with",
+    "summarises",         # wiki --summarises--> entity it is built from
+    "not_duplicate",      # two wikis judged distinct (self-clears the dedup pass)
+    "duplicate_of",       # retired wiki --duplicate_of--> canonical wiki (post-merge)
+    "consolidated_into",  # provenance of an LLM-performed consolidation
 ]
 
 

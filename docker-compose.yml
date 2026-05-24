@@ -15,6 +15,10 @@ services:
       DEEPINFRA_API_KEY: ${DEEPINFRA_API_KEY:-}
       VLLM_API_KEY: ${VLLM_API_KEY:-}
       AGENT_VERBOSE: ${AGENT_VERBOSE:-false}
+      # Orphan freshness gate (the orphan SQL runs in this api process, not in
+      # the scheduler): an entity is wiki-eligible only once created_at is
+      # older than this many minutes, so still-ingesting subjects settle first.
+      WIKI_FRESHNESS_MINUTES: ${WIKI_FRESHNESS_MINUTES:-30}
     extra_hosts:
       # Lets self-hosted profiles (e.g. vllm_workstation) reach a server bound
       # to the Docker host's loopback. Docker Desktop sets this implicitly;
@@ -24,8 +28,16 @@ services:
       - "${API_PORT:-8000}:${API_PORT:-8000}"
     volumes:
       - .:/app
+    # Note: NO `--reload` in the api command. With the bind mount (`.:/app`)
+    # in dev, `--reload` causes uvicorn to restart on every .py edit, which
+    # interrupts in-flight LLM calls (the scheduler logs `Connection refused`
+    # during the ~20-30s embedding-model reload). Code changes are applied
+    # explicitly via `docker compose up -d --no-deps --force-recreate api` —
+    # the operator picks the moment. Anyone who wants dev-style live reload
+    # can override this command via `docker compose run` or a personal
+    # `docker-compose.override.yml`.
     command: >
-      sh -c "alembic upgrade head && uvicorn braindb.main:app --host 0.0.0.0 --port ${API_PORT:-8000} --reload"
+      sh -c "alembic upgrade head && uvicorn braindb.main:app --host 0.0.0.0 --port ${API_PORT:-8000}"
 
   watcher:
     build: .
@@ -41,6 +53,26 @@ services:
     volumes:
       - .:/app
     command: python -m braindb.ingest_watcher
+
+  # Always-on wiki maintenance sidecar — same posture as `watcher`. It loops
+  # cron -> maintain -> write so wikis self-organise from entities with zero
+  # manual steps. To run without it (e.g. cost control), start the stack
+  # excluding this service or scale it to 0 — exactly as you would the watcher.
+  wiki_scheduler:
+    build: .
+    container_name: braindb_wiki_scheduler
+    restart: unless-stopped
+    depends_on:
+      - api
+    networks:
+      - local-network
+    environment:
+      BRAINDB_API_URL: http://api:${API_PORT:-8000}
+      WIKI_ENABLED: ${WIKI_ENABLED:-false}
+      WIKI_INTERVAL: ${WIKI_INTERVAL:-60}
+    volumes:
+      - .:/app
+    command: python -m braindb.wiki_scheduler
 
 networks:
   local-network:

@@ -1,0 +1,79 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  validator-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_PASSWORD: password
+          POSTGRES_DB: braindb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Enable required postgres extensions
+        run: |
+          PGPASSWORD=password psql -h localhost -U postgres -d braindb \
+            -c "CREATE EXTENSION IF NOT EXISTS pg_trgm; CREATE EXTENSION IF NOT EXISTS vector;"
+
+      - name: Configure .env for the CI stack
+        run: |
+          cat > .env <<'EOF'
+          DATABASE_URL=postgresql://postgres:password@host.docker.internal:5432/braindb
+          API_PORT=8000
+          LLM_PROFILE=deepinfra
+          DEEPINFRA_API_KEY=ci-placeholder-key-not-used
+          AGENT_VERBOSE=false
+          WIKI_ENABLED=false
+          EOF
+
+      - name: Create the local-network the compose file expects
+        run: docker network create local-network
+
+      - name: Bring up the stack
+        run: docker compose up -d --build
+
+      - name: Wait for /health
+        run: |
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:8000/health > /dev/null; then
+              echo "API healthy after ${i} attempts"
+              curl -s http://localhost:8000/health
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "API failed to become healthy"
+          docker logs braindb_api --tail 100
+          exit 1
+
+      - name: Install pytest into the api container
+        run: docker exec braindb_api pip install pytest pytest-asyncio --quiet
+
+      - name: Run validator + handoff unit tests
+        run: |
+          docker exec braindb_api python -m pytest \
+            tests/test_final_answer_rename.py \
+            tests/test_handoff_hooks.py \
+            -v
+
+      - name: Dump api logs on failure
+        if: failure()
+        run: docker logs braindb_api --tail 200

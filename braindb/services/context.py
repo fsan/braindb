@@ -17,8 +17,12 @@ from braindb.config import settings
 from braindb.schemas.search import ContextRequest, ContextResponse, SearchResultItem
 from braindb.services.embedding_service import get_embedding_service
 from braindb.services.graph import graph_expand
-from braindb.services.keyword_service import find_entities_for_keywords, find_similar_keywords
-from braindb.services.search import fuzzy_search
+from braindb.services.keyword_service import (
+    find_entities_for_keywords,
+    find_fuzzy_keywords,
+    find_similar_keywords,
+)
+from braindb.services.search import fuzzy_search, preview
 
 DECAY_RATES = {
     "thought":    settings.decay_rate_thought,
@@ -26,6 +30,7 @@ DECAY_RATES = {
     "source":     settings.decay_rate_source,
     "datasource": settings.decay_rate_datasource,
     "rule":       settings.decay_rate_rule,
+    "wiki":       settings.decay_rate_wiki,
 }
 
 
@@ -49,6 +54,7 @@ EXT_QUERIES = {
     "source":     ("sources_ext",     "entity_id, url, domain, http_status, last_checked_at"),
     "datasource": ("datasources_ext", "entity_id, file_path, url, content_hash, word_count, language"),
     "rule":       ("rules_ext",       "entity_id, always_on, category, priority, is_active"),
+    "wiki":       ("wikis_ext",       "entity_id, canonical_name, disambiguation, language, member_keyword_ids::text[] AS member_keyword_ids, revision, last_synthesised_at, retired_at, redirect_to"),
 }
 
 
@@ -111,7 +117,7 @@ def _to_item(row: dict, search_score: float, depth: int, relevance: float, ext: 
         id=row["id"],
         entity_type=row["entity_type"],
         title=row.get("title"),
-        content=row["content"],
+        content=preview(row.get("content"), row.get("id")),
         summary=row.get("summary"),
         keywords=row.get("keywords") or [],
         importance=row["importance"],
@@ -131,6 +137,116 @@ def _to_item(row: dict, search_score: float, depth: int, relevance: float, ext: 
 
 
 # ------------------------------------------------------------------ #
+# Two-level diversity quota (per-search-term + per-keyword)            #
+# ------------------------------------------------------------------ #
+
+def _apply_two_level_quota(
+    items: list,
+    dominant_kw_by_id: dict[str, str],
+    per_query_top_ids: list[list[str]],
+    max_results: int,
+    per_query_share: float,
+    halving: float,
+) -> list:
+    """Re-rank `items` (sorted by `final_rank` desc) under two
+    complementary diversity quotas. Both run in ONE pass so they can
+    never conflict.
+
+    Level 1 — per-search-term (the user's outer quota):
+      Each query in `per_query_top_ids` gets a reserved share of the
+      output. Walking the per-query top-K lists first guarantees each
+      angle of the multi-query recall surfaces something in the
+      result, even if its absolute scores would be outranked globally.
+
+    Level 2 — per-keyword (the inner quota):
+      Walking the remaining items in `final_rank`-desc order, each
+      new dominant matched keyword gets a halving slot allowance
+      (`ceil(max_results × halving^n)`, floor 1). Stops a single
+      popular keyword (e.g. `user-profile` tagging 100 biographical
+      facts) from monopolising the open portion of the result.
+
+    HOW THE TWO LEVELS COEXIST WITHOUT CONFLICT (this is the crucial
+    bit, please read before changing this function):
+
+      Both levels share ONE counter dict (`seen`: kw_id → remaining).
+      Level 1 places reserved items first and decrements their
+      dominant keyword's allowance. Level 2 then walks the open items
+      and respects what L1 already consumed. So:
+
+      - A reserved item is added unconditionally (L1 wins). Its
+        keyword's L2 quota shrinks accordingly — no double spending
+        in the open phase.
+      - If a popular keyword's allowance is exhausted purely by L1
+        reservations, L2 will skip further entities tagged dominantly
+        with it. That's the intended hard cap.
+      - Items without a dominant keyword (graph-expansion finds, the
+        discoverability backup) pass through both phases freely;
+        they're not counted against any keyword's allowance.
+
+    `per_query_share`=0 disables L1 (only L2 runs). `halving`>=1.0
+    disables L2 (only L1 + raw top-N for the rest). Both at extremes
+    = raw top-N.
+    """
+    seen: dict[str, int] = {}   # kw_id → remaining slots (SHARED across L1 + L2)
+    n_new = 0                    # number of distinct keywords met so far (drives the halving sequence)
+    taken: set[str] = set()      # entity ids already placed (dedup across L1's per-query lists)
+    out: list = []
+
+    def _consume(item) -> bool:
+        """Try to place `item` in `out`, respecting the per-keyword quota.
+        Returns True if placed, False if blocked by L2."""
+        nonlocal n_new
+        if str(item.id) in taken:
+            return False
+        kw = dominant_kw_by_id.get(str(item.id))
+        if kw is None:
+            # No keyword to gate against (graph-expansion / discovery
+            # fallback) — let it through.
+            taken.add(str(item.id))
+            out.append(item)
+            return True
+        if halving < 1.0:
+            if kw not in seen:
+                # Lazy-init this keyword's allowance using its position
+                # in the geometric-decay sequence.
+                seen[kw] = max(1, math.ceil(max_results * (halving ** n_new)))
+                n_new += 1
+            if seen[kw] <= 0:
+                return False
+            seen[kw] -= 1
+        taken.add(str(item.id))
+        out.append(item)
+        return True
+
+    # Map id → item so we can walk per-query lists in O(1).
+    by_id: dict[str, object] = {str(it.id): it for it in items}
+
+    # ---- LEVEL 1: per-search-term reservation phase --------------------
+    # Walk each query's own top-K and place reserved items first.
+    # `per_query_top_ids[q_index]` is already sorted by THIS query's
+    # combined score, so we get the best-for-this-angle items first.
+    if per_query_share > 0:
+        for q_top in per_query_top_ids:
+            for eid in q_top:
+                item = by_id.get(eid)
+                if item is None:
+                    continue
+                _consume(item)
+                if len(out) >= max_results:
+                    return out
+
+    # ---- LEVEL 2: open phase with per-keyword quota --------------------
+    # Walk remaining items in global final_rank-desc order. `_consume`
+    # respects whatever L1 already used up in the `seen` counter, so
+    # a keyword that filled its quota via L1 is correctly blocked here.
+    for item in items:
+        if len(out) >= max_results:
+            break
+        _consume(item)
+    return out
+
+
+# ------------------------------------------------------------------ #
 # Main context assembly                                               #
 # ------------------------------------------------------------------ #
 
@@ -139,47 +255,102 @@ def assemble_context(conn, req: ContextRequest) -> ContextResponse:
     query_list = req.queries if req.queries else [req.query]
 
     # ------------------------------------------------------------------ #
-    # 1. TEXT SEARCH (existing) — fuzzy + fulltext per query              #
+    # 1. TEXT SEARCH (keyword-mediated) — fuzzy on KEYWORD entities,      #
+    #    then fan out via tagged_with. Symmetric to the embedding         #
+    #    pathway below: both produce a per-entity score equal to the      #
+    #    best match between the query and the entity's tagged keywords.   #
+    #    This avoids the pg_trgm dilution that previously hit any short   #
+    #    query against a long entity body — keywords are short, so the    #
+    #    trigram intersection is meaningful, not diluted.                 #
     # ------------------------------------------------------------------ #
-    text_scores: dict = {}       # entity_id → best text score
+    text_scores: dict = {}       # entity_id → best keyword-fuzzy similarity (max across queries)
+    text_dom_kw: dict = {}       # entity_id → keyword_id that yielded the text_scores max
+    text_scores_by_q: list = []  # per-query: list of {entity_id → best_sim for THIS query}
     seed_rows_by_id: dict = {}   # entity_id → row data
+    fuzzy_rows: dict = {}        # entity_id → row data (entities found only via fuzzy-keyword)
 
     for q in query_list:
-        rows = fuzzy_search(conn, q, req.entity_types, req.min_importance, limit=max(req.max_results, 20))
+        per_q_scores: dict = {}  # this query's text scores only — feeds Level-1 quota
+        fuzzy_kw = find_fuzzy_keywords(
+            conn, q, limit=settings.scoring_pool_fuzzy,
+        )
+        if fuzzy_kw:
+            kw_sim = {str(kw["id"]): kw["similarity"] for kw in fuzzy_kw}
+            entities = find_entities_for_keywords(conn, list(kw_sim.keys()))
+            for ent in entities:
+                eid = ent["id"]
+                matched_ids = [str(mid) for mid in (ent.get("matched_keyword_ids") or [])]
+                if matched_ids:
+                    # Pick the matched keyword with the strongest similarity for this entity
+                    best_kw_id = max(matched_ids, key=lambda m: kw_sim.get(m, 0))
+                    best_sim = kw_sim.get(best_kw_id, 0)
+                    per_q_scores[str(eid)] = best_sim
+                    if eid not in text_scores or best_sim > text_scores[eid]:
+                        text_scores[eid] = best_sim
+                        text_dom_kw[eid] = best_kw_id
+                        if eid not in seed_rows_by_id:
+                            fuzzy_rows[eid] = ent
+        text_scores_by_q.append(per_q_scores)
+
+    # Discoverability backup — entities whose content matches the query
+    # directly but aren't tagged with a matching keyword. Heavy discount
+    # (`DISCOVERY_DISCOUNT`) keeps them weakly-ranked. Pure fallback: only
+    # set text_scores for an entity if the keyword-mediated path didn't
+    # already cover it (never override a real keyword match).
+    DISCOVERY_DISCOUNT = 0.2
+    for q in query_list:
+        rows = fuzzy_search(
+            conn, q, req.entity_types, req.min_importance,
+            limit=settings.scoring_pool_fuzzy,
+        )
         for r in rows:
             eid = r["id"]
-            score = r["score"]
-            if eid not in text_scores or score > text_scores[eid]:
-                text_scores[eid] = score
-                seed_rows_by_id[eid] = r
+            if eid in text_scores:
+                continue   # keyword path already scored this entity; do not override
+            text_scores[eid] = r["score"] * DISCOVERY_DISCOUNT
+            if eid not in seed_rows_by_id and eid not in fuzzy_rows:
+                fuzzy_rows[eid] = r
 
     # ------------------------------------------------------------------ #
     # 2. KEYWORD EMBEDDING SEARCH (new) — semantic via keyword vectors    #
     # ------------------------------------------------------------------ #
-    embedding_scores: dict = {}  # entity_id → best keyword similarity
+    embedding_scores: dict = {}  # entity_id → best keyword similarity (max across queries)
+    embedding_dom_kw: dict = {}  # entity_id → keyword_id that yielded the embedding_scores max
+    embedding_scores_by_q: list = []  # per-query embedding scores — feeds Level-1 quota
     embedding_rows: dict = {}    # entity_id → row data (for entities found only via embedding)
 
     emb_svc = get_embedding_service()
     if emb_svc.is_available():
         for q in query_list:
+            per_q_scores: dict = {}
             query_emb = emb_svc.embed(q)
-            if not query_emb:
-                continue
-            similar_kw = find_similar_keywords(conn, query_emb, limit=30)
-            if not similar_kw:
-                continue
-            kw_sim = {str(kw["id"]): kw["similarity"] for kw in similar_kw}
-            kw_ids = list(kw_sim.keys())
-            entities = find_entities_for_keywords(conn, kw_ids)
-            for ent in entities:
-                eid = ent["id"]
-                matched_ids = [str(mid) for mid in (ent.get("matched_keyword_ids") or [])]
-                if matched_ids:
-                    best_sim = max(kw_sim.get(mid, 0) for mid in matched_ids)
-                    if eid not in embedding_scores or best_sim > embedding_scores[eid]:
-                        embedding_scores[eid] = best_sim
-                        if eid not in seed_rows_by_id:
-                            embedding_rows[eid] = ent
+            if query_emb:
+                # Scoring pool — same principle: wide candidate set for the
+                # embedding pathway. A narrow keyword may rank far below 30 for
+                # a sentence-shaped query even when it's an exact term match;
+                # widening here keeps it visible to the rest of the pipeline.
+                similar_kw = find_similar_keywords(
+                    conn, query_emb, limit=settings.scoring_pool_keyword_neighbors,
+                )
+                if similar_kw:
+                    kw_sim = {str(kw["id"]): kw["similarity"] for kw in similar_kw}
+                    kw_ids = list(kw_sim.keys())
+                    entities = find_entities_for_keywords(conn, kw_ids)
+                    for ent in entities:
+                        eid = ent["id"]
+                        matched_ids = [str(mid) for mid in (ent.get("matched_keyword_ids") or [])]
+                        if matched_ids:
+                            best_kw_id = max(matched_ids, key=lambda m: kw_sim.get(m, 0))
+                            best_sim = kw_sim.get(best_kw_id, 0)
+                            per_q_scores[str(eid)] = best_sim
+                            if eid not in embedding_scores or best_sim > embedding_scores[eid]:
+                                embedding_scores[eid] = best_sim
+                                embedding_dom_kw[eid] = best_kw_id
+                                if eid not in seed_rows_by_id:
+                                    embedding_rows[eid] = ent
+            embedding_scores_by_q.append(per_q_scores)
+    else:
+        embedding_scores_by_q = [{} for _ in query_list]
 
     # ------------------------------------------------------------------ #
     # 3. MERGE — geometric mean when both, penalty when single signal     #
@@ -196,7 +367,10 @@ def assemble_context(conn, req: ContextRequest) -> ContextResponse:
             seed_scores[eid] = text_s * penalty            # text only — penalized
         elif emb_s:
             seed_scores[eid] = emb_s * penalty             # embedding only — penalized
-        # Ensure we have row data for embedding-only entities
+        # Ensure we have row data for entities that came in via either
+        # of the two keyword-mediated pathways.
+        if eid not in seed_rows_by_id and eid in fuzzy_rows:
+            seed_rows_by_id[eid] = fuzzy_rows[eid]
         if eid not in seed_rows_by_id and eid in embedding_rows:
             seed_rows_by_id[eid] = embedding_rows[eid]
 
@@ -229,7 +403,63 @@ def assemble_context(conn, req: ContextRequest) -> ContextResponse:
         items.append(_to_item(row, score, depth, relevance, ext_map.get(eid, {})))
 
     items.sort(key=lambda x: x.final_rank, reverse=True)
-    items = items[: req.max_results]
+
+    # Build the inputs the two-level diversity quota needs.
+    #
+    # `dominant_kw_by_id`: which matched keyword "won" for each entity
+    # (used by Level 2 — per-keyword quota). Whichever pathway scored
+    # the entity higher (text-fuzzy or embedding) supplies the keyword.
+    dominant_kw_by_id: dict[str, str] = {}
+    for eid in seed_scores:
+        text_s = text_scores.get(eid, 0.0)
+        emb_s = embedding_scores.get(eid, 0.0)
+        if emb_s >= text_s and eid in embedding_dom_kw:
+            dominant_kw_by_id[str(eid)] = embedding_dom_kw[eid]
+        elif eid in text_dom_kw:
+            dominant_kw_by_id[str(eid)] = text_dom_kw[eid]
+
+    # `per_query_top_ids`: each query's top-K entities by THAT query's
+    # own combined score (geometric-mean merge of text + embedding per
+    # query, same formula the global merge uses). Used by Level 1 —
+    # per-search-term reservation. Each query gets `K` reserved slots:
+    # `K = ceil(max_results × per_query_share / num_queries)`. The
+    # narrow-query-strategy nudge in `recall_memory`'s docstring is
+    # what makes this useful: when the agent issues a focused
+    # single-keyword query alongside broader ones, that focused query
+    # is guaranteed a reserved share of the result.
+    penalty = settings.missing_signal_penalty
+    nq = max(1, len(query_list))
+    per_q_reserved = max(
+        0, math.ceil(req.max_results * settings.per_query_share / nq)
+    )
+    per_query_top_ids: list[list[str]] = []
+    if per_q_reserved > 0 and settings.per_query_share > 0:
+        for q_idx in range(nq):
+            t_q = text_scores_by_q[q_idx] if q_idx < len(text_scores_by_q) else {}
+            e_q = embedding_scores_by_q[q_idx] if q_idx < len(embedding_scores_by_q) else {}
+            # Same merge math as the global seed_scores, but using
+            # only THIS query's text and embedding signals.
+            per_q_seed: dict[str, float] = {}
+            for eid in set(t_q) | set(e_q):
+                t = t_q.get(eid)
+                e = e_q.get(eid)
+                if t and e:
+                    per_q_seed[eid] = math.sqrt(t * e)
+                elif t:
+                    per_q_seed[eid] = t * penalty
+                elif e:
+                    per_q_seed[eid] = e * penalty
+            ordered = sorted(per_q_seed.items(), key=lambda kv: -kv[1])[:per_q_reserved]
+            per_query_top_ids.append([eid for eid, _ in ordered])
+
+    items = _apply_two_level_quota(
+        items,
+        dominant_kw_by_id,
+        per_query_top_ids,
+        req.max_results,
+        per_query_share=settings.per_query_share,
+        halving=settings.keyword_quota_halving,
+    )
 
     always_on = []
     if req.include_always_on_rules:

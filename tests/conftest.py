@@ -51,6 +51,59 @@ def _require_live_api() -> None:
         )
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _purge_pytest_artefacts_at_session_end() -> Iterator[None]:
+    """Session teardown safety net for the per-test `created_entities`
+    fixture: any test that errors before registering its IDs (or that
+    bypasses the factories entirely) still leaks `_pytest_<hex>` rows
+    into the live DB. After all tests finish, sweep those out.
+
+    Pattern uniqueness: `_pytest_<8-hex>` is generated only by the
+    `test_tag` fixture above and never by production code — so a
+    `content LIKE '_pytest_%'` filter on keyword entities is provably
+    scoped to test artefacts.
+
+    Order matters: delete tagged entities (facts/thoughts/...) FIRST so
+    their `tagged_with` edges drop via FK cascade, then the keyword
+    entities themselves.
+    """
+    yield
+    try:
+        from braindb.db import get_conn  # only imported at teardown
+    except Exception as exc:   # noqa: BLE001 — defensive, never block the session
+        print(f"\n[conftest] session cleanup skipped (db import failed): {exc}")
+        return
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    DELETE FROM entities WHERE id IN (
+                      SELECT r.from_entity_id FROM relations r
+                      JOIN entities kw ON kw.id = r.to_entity_id
+                      WHERE r.relation_type = 'tagged_with'
+                        AND kw.entity_type = 'keyword'
+                        AND kw.content LIKE E'\\_pytest\\_%' ESCAPE '\\'
+                    )
+                    """
+                )
+                tagged_deleted = cur.rowcount
+                cur.execute(
+                    """
+                    DELETE FROM entities
+                    WHERE entity_type = 'keyword'
+                      AND content LIKE E'\\_pytest\\_%' ESCAPE '\\'
+                    """
+                )
+                kw_deleted = cur.rowcount
+        print(
+            f"\n[conftest] session cleanup: removed {tagged_deleted} "
+            f"tagged entities + {kw_deleted} _pytest_* keywords"
+        )
+    except Exception as exc:   # noqa: BLE001 — never break the session on cleanup
+        print(f"\n[conftest] session cleanup error (ignored): {exc}")
+
+
 @pytest.fixture
 def api() -> str:
     """Base URL for the API — tests append paths like f'{api}/api/v1/...'."""
