@@ -17,9 +17,9 @@
 ## ⚠ Correction applied (supersedes earlier "gate/manifest/ledger" design)
 
 The first implementation inserted programmatic algorithms between the process
-and the LLM that destroyed its grasp of reality (e.g. "Dimitris Madenidis is
-an ML engineer", "Koutsoumpos is a marine engineer", "Artificial Intelligence"
-= one NVIDIA earnings call). Root cause: per-orphan pinhole context, an
+and the LLM that destroyed its grasp of reality (e.g. "Subject A is an ML
+engineer", "Koutsoumpos is a marine engineer", "Artificial Intelligence" =
+one NVIDIA earnings call). Root cause: per-orphan pinhole context, an
 accounted-change gate that *blocked self-correction*, a rigid JSON manifest, a
 code-generated references ledger, and prompts that never told the LLM to
 investigate. **Principle reinstated: programmatic = process / queue /
@@ -57,7 +57,7 @@ Frozen snapshot `maintainer-agent-plan2.md` is intentionally left as the
 original approved record. The cron / claim / skip-self-clear / soft-retire /
 snapshot bookkeeping is unchanged.
 
-### Self-heal test result (Madenidis) — honest
+### Self-heal test result (Subject A) — honest
 
 - **Structural fix: PASS.** No cage; writer revises freely; prior versions
   snapshotted (`wiki_revise` rev 1→4, reversible); LLM authored body/keywords/
@@ -88,7 +88,7 @@ Three non-bloat changes (prompt + one-time safe reset, no code/gates):
    wiki-only relations). Knowledge byte-identical (fact 134, thought 23,
    source 8, datasource 7, keyword 603, activity_log 1199 — unchanged).
 
-Re-created "Dimitris Madenidis" via the corrected flow (logs confirm the
+Re-created "Subject A" via the corrected flow (logs confirm the
 verbatim non-anchored template, no leakage). Result page:
 - Summary: "A Greek youth and natural tinkerer born in 2011 who aspires to
   become a boat mechanic." ✓
@@ -99,7 +99,7 @@ verbatim non-anchored template, no leakage). Result page:
 
 Conclusion: conflation was a **process** failure, now fixed with prompt +
 safe reset only — no new code, gates, or bloat. Caveats: verified on the
-Madenidis case in create mode; the ~700 triage backlog still to be drained,
+Subject A case in create mode; the ~700 triage backlog still to be drained,
 and per-wiki runs are slow (recall + a real resolution subagent on
 gemma-4-31B → minutes each → this is background-scheduler work, not
 interactive). Upstream fact-level identity anchoring remains a *possible

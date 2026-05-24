@@ -450,7 +450,7 @@ curl -s -X POST http://localhost:8000/api/v1/wikis \
   -d '{
     "content": "# Sawki\n\nFull markdown body here...",
     "canonical_name": "Sawki",
-    "disambiguation": "Egyptian employee under Dimitrios Koutsoumpos",
+    "disambiguation": "Team member, distinct from other people with similar names",
     "language": "en",
     "member_keyword_ids": ["<keyword-uuid>"],
     "keywords": ["Sawki", "Egypt", "Petros"],

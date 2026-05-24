@@ -10,7 +10,7 @@ Prerequisites: Docker Desktop (or any Docker Engine), Python 3.12, a Postgres 16
 git clone <repo-url> braindb
 cd braindb
 cp .env.example .env
-# edit .env — set DATABASE_URL, pick an LLM_PROFILE, fill in the matching API key
+# edit .env — set DATABASE_URL; recommended LLM_PROFILE=deepinfra + DEEPINFRA_API_KEY (or any other profile)
 
 docker network create local-network       # one-time; docker-compose expects this
 docker compose up -d --build
@@ -35,6 +35,8 @@ pytest tests/test_split_chunks.py   # a single file
 See [`tests/README.md`](tests/README.md) for what is and isn't covered.
 
 ## Adding a new LLM provider
+
+The reference implementation and recommended default is `deepinfra` with `google/gemma-4-31B-it` — fast, cheap, validated end-to-end on the wiki/maintainer/writer pipeline. Other providers are configured the same way.
 
 LiteLLM does the heavy lifting — providers are selected by a prefix in the model string. To add a provider:
 

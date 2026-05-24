@@ -2,7 +2,7 @@
 
 A memory database and REST API for LLM agents. Store and retrieve thoughts, facts, sources, documents, and behavioral rules — with fuzzy + semantic keyword search, graph traversal up to 3 hops, temporal decay, and always-on rule injection. Built to be driven externally by an LLM via HTTP calls.
 
-It also ships with **its own internal agent** (OpenAI Agents SDK + LiteLLM with pluggable providers — DeepInfra by default, NIM / others via config) so external callers can talk to BrainDB in plain English via a single endpoint instead of orchestrating individual API calls.
+It also ships with **its own internal agent** (OpenAI Agents SDK + LiteLLM with pluggable providers — **DeepInfra is the recommended default**, with NIM / local vLLM / others available via config) so external callers can talk to BrainDB in plain English via a single endpoint instead of orchestrating individual API calls.
 
 ---
 
@@ -72,11 +72,11 @@ Any reachable hostname/IP works — the connecting user just needs network acces
 
 ### 4. Pick an LLM provider (for the internal agent)
 
-The agent talks to any LiteLLM-supported backend. BrainDB ships with two profiles pre-configured: **DeepInfra** (default, fast, paid) and **NVIDIA NIM** (free tier, can be flaky).
+The agent talks to any LiteLLM-supported backend. **Recommended for new users: `deepinfra` with `google/gemma-4-31B-it`** — fast (5–30s per agent call), cheap, validated end-to-end on the wiki/maintainer/writer pipeline. `nim` is a free-tier fallback (occasionally flaky). The `vllm_*` profiles run a local model on your own GPU workstation — useful for offline / cost-free experiments, but require a running vLLM server reachable from the docker network (typically via SSH tunnel).
 
 In `.env`:
 ```
-LLM_PROFILE=deepinfra        # or 'nim' — default is 'deepinfra'
+LLM_PROFILE=deepinfra        # recommended default
 DEEPINFRA_API_KEY=...        # if profile=deepinfra — get from https://deepinfra.com/
 NVIDIA_NIM_API_KEY=...       # if profile=nim       — get from https://build.nvidia.com/
 ```
@@ -176,7 +176,13 @@ The agent has 21 tools — every single BrainDB endpoint plus `delegate_to_subag
 
 **LLM provider — pluggable via `.env`**:
 
-`LLM_PROFILE` selects the backend. Profiles are defined in [braindb/config.py](braindb/config.py) (`_LLM_PROFILES`) — currently `deepinfra` (default, model `google/gemma-4-31B-it`), `nim` (NVIDIA NIM, model `google/gemma-4-31b-it`), `vllm_workstation` (local vLLM, Gemma AWQ-4bit), and `vllm_workstation_qwen` (local vLLM, Qwen 27B AWQ-INT4). Each profile is a model-prefix + env-var pair; adding a new one is a dict entry.
+`LLM_PROFILE` selects the backend. Profiles are defined in [braindb/config.py](braindb/config.py) (`_LLM_PROFILES`):
+
+- **`deepinfra` — recommended default.** Model `google/gemma-4-31B-it`. Fast (5–30s per agent call), cheap, validated end-to-end.
+- `nim` — NVIDIA NIM, model `google/gemma-4-31b-it`. Free tier, occasionally flaky.
+- `vllm_workstation` / `vllm_workstation_qwen` / `vllm_workstation_gemma` — local vLLM running on your own GPU (advanced / offline; needs the server reachable from the docker network, usually via SSH tunnel).
+
+Each profile is a model-prefix + env-var pair; adding a new one is a dict entry.
 
 ```
 LLM_PROFILE=deepinfra         # or nim / vllm_workstation / vllm_workstation_qwen

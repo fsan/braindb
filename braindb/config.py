@@ -6,6 +6,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # Each profile is a LiteLLM model prefix + the env var holding its API key,
 # plus an optional base_url for self-hosted OpenAI-compatible servers (vLLM,
 # Ollama, llama.cpp). Adding a new provider is a dict entry, no code change.
+#
+# `deepinfra` is the recommended default — fast, cheap, validated end-to-end
+# in the wiki/maintainer/writer pipeline. The `vllm_*` profiles are for
+# advanced / self-hosted / offline use and require a workstation GPU
+# (typically reached over an SSH tunnel from the docker network).
 _LLM_PROFILES: dict[str, dict[str, str]] = {
     "nim": {
         "model": "nvidia_nim/google/gemma-4-31b-it",
