@@ -24,16 +24,26 @@ If your API lives somewhere other than `localhost:8000`, set `window.BRAINDB_API
 
 | File | Purpose |
 |---|---|
-| `index.html` | Layout shell: top bar with Reader / Ops tabs, the Reader grid (rail / wiki body / relations), the Ops grid (stats / queue / log / rules), and two slide-over drawers (entity / Ask). |
-| `style.css` | Design language: near-monochrome palette, refined serif for body, clean grotesque for UI, hairline rules, one restrained accent. Light + dark via `data-theme` on `<html>`. |
+| `index.html` | Layout shell: top bar with Reader / Graph / Ops tabs, the Reader grid (rail / wiki body / relations), the Graph view (Cytoscape canvas + toolbar + legend), the Ops grid (stats / queue / log / rules), and two slide-over drawers (entity / Ask). Loads Cytoscape + fCoSE from a CDN. |
+| `style.css` | Design language: near-monochrome palette, refined serif for body, clean grotesque for UI, hairline rules, one restrained accent. Light + dark via `data-theme` on `<html>`. Graph view tokens included. |
 | `wiki-render.js` | Small Markdown-ish renderer specialised for the BrainDB wiki body grammar — `<!-- wiki:meta -->`, headings, `> **Summary:** / **Disambiguation:**` callouts, `<!-- section:slug -->` dividers, GFM tables, lists, `**bold**`, `` `code` ``, and `[[ref:UUID]]` / `[[ref:UUID|display]]` citation chips (tolerant of the grouped form). |
-| `app.js` | Data layer + routing + Ops auto-refresh + Ask drawer wiring. ES module; imports `wiki-render.js`. |
+| `graph.js` | Cytoscape.js integration: per-entity-type shapes/colours, edge-label-on-hover, click → entity drawer, double-click → expand 1-hop neighbourhood, 300-node soft cap. |
+| `app.js` | Data layer + routing + Ops auto-refresh + Ask drawer wiring + Graph tab wiring. ES module; imports `wiki-render.js` and `graph.js`. |
 
 ## Keyboard
 
 - `/` — focus the search box (Reader)
 - `Cmd/Ctrl+K` — open the Ask drawer
 - `Esc` — close any open drawer
+- `F` — fit graph to viewport (Graph tab)
+
+## Graph tab — quick tour
+
+- Open a wiki in **Reader**, then click the **Graph** tab → the graph seeds with that wiki and its direct neighbours (keywords, facts, sources).
+- Cold-start the Graph tab → empty canvas with a search box; pick a result to seed.
+- **Click** any node → opens the entity drawer (same one Reader uses).
+- **Double-click** a node → expands its 1-hop neighbourhood.
+- Scroll to zoom, drag empty space to pan. Soft-capped at 300 nodes.
 
 ## Endpoints used
 
@@ -50,3 +60,10 @@ Read-only except where intentional:
 - `POST /api/v1/agent/query` — the Ask drawer
 
 No `/memory/sql`. No direct database access. No write outside the user-driven Ask drawer.
+
+## External dependencies (CDN, optional)
+
+- [Cytoscape.js](https://js.cytoscape.org/) 3.30.4 — graph rendering for the Graph tab.
+- [cytoscape-fcose](https://github.com/iVis-at-Bilkent/cytoscape.js-fcose) 2.2.0 — force-directed layout for the Graph tab.
+
+Both are loaded from `unpkg.com` in `index.html` with pinned versions. If the CDN is unreachable, the Graph tab shows an error message and the rest of the app (Reader / Ops / Ask) continues to work.
