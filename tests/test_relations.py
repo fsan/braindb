@@ -1,6 +1,8 @@
 """
 Relation CRUD + inbound/outbound listing + type validation.
 """
+import uuid
+
 import requests
 
 
@@ -87,6 +89,25 @@ def test_invalid_relation_type_is_rejected(api, make_fact):
         timeout=10,
     )
     assert r.status_code in (400, 422), f"expected 4xx, got {r.status_code}: {r.text[:200]}"
+
+
+def test_create_relation_rejects_missing_entity(api, make_fact):
+    existing = make_fact("Existing endpoint.")
+    missing_id = str(uuid.uuid4())
+
+    r = requests.post(
+        f"{api}/api/v1/relations",
+        json={
+            "from_entity_id": missing_id,
+            "to_entity_id": existing["id"],
+            "relation_type": "supports",
+            "relevance_score": 0.5,
+        },
+        timeout=10,
+    )
+
+    assert r.status_code == 404
+    assert r.json()["detail"] == f"Entity not found: {missing_id}"
 
 
 def test_all_documented_relation_types_accepted(api, make_fact, make_relation):

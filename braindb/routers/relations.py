@@ -34,9 +34,24 @@ def _or_404(row: dict | None) -> dict:
     return row
 
 
+def _ensure_entities_exist(conn, *entity_ids: UUID) -> None:
+    entity_id_params = tuple(str(entity_id) for entity_id in entity_ids)
+    expected_ids = set(entity_id_params)
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id FROM entities WHERE id IN (%s, %s)",
+            entity_id_params,
+        )
+        found_ids = {str(row[0]) for row in cur.fetchall()}
+    missing_ids = sorted(expected_ids - found_ids)
+    if missing_ids:
+        raise HTTPException(status_code=404, detail=f"Entity not found: {missing_ids[0]}")
+
+
 @router.post("/api/v1/relations", response_model=RelationRead, status_code=201)
 def create_relation(body: RelationCreate):
     with get_conn() as conn:
+        _ensure_entities_exist(conn, body.from_entity_id, body.to_entity_id)
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             try:
                 cur.execute("""
@@ -53,6 +68,9 @@ def create_relation(body: RelationCreate):
             except psycopg2.errors.UniqueViolation:
                 conn.rollback()
                 raise HTTPException(409, "Relation of this type already exists between these entities")
+            except psycopg2.errors.ForeignKeyViolation:
+                conn.rollback()
+                raise HTTPException(404, "One or both relation endpoints do not exist")
         log_activity(conn, "create", "relation", rid, details={
             "from_entity_id": str(body.from_entity_id),
             "to_entity_id": str(body.to_entity_id),
