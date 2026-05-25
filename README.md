@@ -1,5 +1,9 @@
 # BrainDB
 
+[![BrainDB walkthrough](https://img.youtube.com/vi/AJ7iMOj4vvA/maxresdefault.jpg)](https://youtu.be/AJ7iMOj4vvA "Watch the BrainDB walkthrough on YouTube")
+
+> **▶ Watch the walkthrough:** [youtu.be/AJ7iMOj4vvA](https://youtu.be/AJ7iMOj4vvA) — Karpathy's LLM wiki idea, on a SQL database, driven by REST APIs.
+
 A memory database and REST API for LLM agents. Store and retrieve thoughts, facts, sources, documents, and behavioral rules — with fuzzy + semantic keyword search, graph traversal up to 3 hops, temporal decay, and always-on rule injection. Built to be driven externally by an LLM via HTTP calls.
 
 It also ships with **its own internal agent** (OpenAI Agents SDK + LiteLLM with pluggable providers — **DeepInfra is the recommended default**, with NIM / local vLLM / others available via config) so external callers can talk to BrainDB in plain English via a single endpoint instead of orchestrating individual API calls.
@@ -306,6 +310,16 @@ provenance to `data/wiki_review/`.)
 automatically. To run without it, bring the stack up excluding the service or
 scale it to 0 (`docker compose up -d --scale wiki_scheduler=0`), exactly as
 you would for the watcher; or point `LLM_PROFILE` at a local model.
+
+## Frontend (optional, read-only)
+
+A small vanilla-JS frontend ships under `frontend/` — no build step. Three views (Reader for browsing wikis, Graph for visual exploration, Ops for watching the maintainer/writer pipeline) plus an Ask drawer that talks to the agent endpoint. Talks to the BrainDB API at `http://localhost:8000`. Serve it from the repo root:
+
+```bash
+cd frontend && python -m http.server 8090
+```
+
+Then open `http://localhost:8090`. See [frontend/README.md](frontend/README.md) for the design notes.
 
 ## Stack
 

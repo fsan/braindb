@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>BrainDB</title>
+  <link rel="stylesheet" href="style.css" />
+  <!-- Graph viz: vis-network (canvas + built-in physics). Pinned version. -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/vis-network/9.1.9/standalone/umd/vis-network.min.js"></script>
+</head>
+<body>
+  <header class="top">
+    <div class="brand">BrainDB</div>
+    <nav class="tabs" role="tablist">
+      <button class="tab is-active" data-tab="reader" role="tab">Reader</button>
+      <button class="tab" data-tab="graph" role="tab">Graph</button>
+      <button class="tab" data-tab="ops" role="tab">Ops</button>
+    </nav>
+    <div class="top-actions">
+      <button id="ask-toggle" class="ask-button" title="Ask BrainDB (Ctrl/Cmd+K)">Ask</button>
+      <button id="theme-toggle" class="theme-toggle" title="Toggle theme">◐</button>
+    </div>
+  </header>
+
+  <main>
+    <!-- ============== READER ============== -->
+    <section id="reader" class="view is-active" role="tabpanel">
+      <aside class="rail">
+        <form id="search-form" class="search">
+          <input id="search-input" type="search" placeholder="Search (/ to focus)" autocomplete="off" />
+        </form>
+        <div id="search-results" class="results" hidden></div>
+        <div class="rail-section-label">Wikis</div>
+        <ul id="wiki-index" class="wiki-index"></ul>
+      </aside>
+
+      <article id="wiki-view" class="wiki-view">
+        <div class="empty">Select a wiki from the left.</div>
+      </article>
+
+      <aside id="relations-panel" class="relations" hidden>
+        <div class="rail-section-label">Relations</div>
+        <div id="relations-body"></div>
+      </aside>
+    </section>
+
+    <!-- ============== GRAPH ============== -->
+    <section id="graph" class="view" role="tabpanel" hidden>
+      <div class="graph-toolbar">
+        <form id="graph-search-form" class="graph-search">
+          <input id="graph-search-input" type="search" placeholder="Search BrainDB (recall) to seed the graph…" autocomplete="off" title="Uses /memory/context — pg_trgm + embeddings + graph traversal. Not Elasticsearch." />
+        </form>
+        <div id="graph-search-results" class="graph-search-results" hidden></div>
+        <div class="graph-spacer"></div>
+        <button id="graph-zoom-in" title="Zoom in">+</button>
+        <button id="graph-zoom-out" title="Zoom out">−</button>
+        <button id="graph-fit" title="Fit (F)">Fit</button>
+        <button id="graph-reset" title="Clear">Reset</button>
+        <label class="graph-toggle">
+          <input type="checkbox" id="graph-hide-kw" />
+          Hide keywords
+        </label>
+        <span id="graph-status" class="graph-status"></span>
+      </div>
+      <div id="graph-canvas" class="graph-canvas">
+        <div class="graph-empty">Open a wiki from the Reader and switch here, or use the search box above to seed.</div>
+      </div>
+      <div class="graph-legend">
+        <span class="lg lg-wiki">Wiki</span>
+        <span class="lg lg-fact">Fact</span>
+        <span class="lg lg-thought">Thought</span>
+        <span class="lg lg-keyword">Keyword</span>
+        <span class="lg lg-source">Source</span>
+        <span class="lg lg-rule">Rule</span>
+        <span class="lg-hint">Hover or zoom for labels · double-click to expand · scroll to zoom · drag to pan</span>
+      </div>
+    </section>
+
+    <!-- ============== OPS ============== -->
+    <section id="ops" class="view" role="tabpanel" hidden>
+      <div class="ops-grid">
+        <div class="ops-block">
+          <div class="rail-section-label">Stats</div>
+          <div id="ops-stats" class="stats-strip"></div>
+        </div>
+
+        <div class="ops-block">
+          <div class="rail-section-label">
+            Pipeline queue
+            <span class="live-dot" title="Auto-refreshes every 30s"></span>
+          </div>
+          <div id="ops-jobs" class="table-wrap"></div>
+        </div>
+
+        <div class="ops-block">
+          <div class="rail-section-label">
+            Activity log
+            <span class="live-dot" title="Auto-refreshes every 30s"></span>
+          </div>
+          <div id="ops-log" class="table-wrap"></div>
+        </div>
+
+        <div class="ops-block">
+          <div class="rail-section-label">Always-on rules</div>
+          <div id="ops-rules" class="rules-list"></div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- ============== Citation / entity drawer ============== -->
+  <aside id="entity-drawer" class="drawer drawer-entity" hidden>
+    <div class="drawer-header">
+      <div class="drawer-title" id="entity-drawer-title"></div>
+      <button class="drawer-close" data-close="entity">×</button>
+    </div>
+    <div id="entity-drawer-body" class="drawer-body"></div>
+  </aside>
+
+  <!-- ============== Agent (Ask) drawer ============== -->
+  <aside id="ask-drawer" class="drawer drawer-ask" hidden>
+    <div class="drawer-header">
+      <div class="drawer-title">Ask BrainDB</div>
+      <button class="drawer-close" data-close="ask">×</button>
+    </div>
+    <div class="drawer-body">
+      <p class="ask-note">Same backend as the agent skill. May save / relate when you ask it to. Calls can take up to ~10 minutes if the provider is slow.</p>
+      <form id="ask-form" class="ask-form">
+        <textarea id="ask-input" rows="4" placeholder="Tell me who the user is..."></textarea>
+        <div class="ask-actions">
+          <button type="submit" id="ask-submit">Send</button>
+          <span id="ask-status" class="ask-status"></span>
+        </div>
+      </form>
+      <div id="ask-output" class="ask-output"></div>
+    </div>
+  </aside>
+
+  <div id="backdrop" class="backdrop" hidden></div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

@@ -5,6 +5,46 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] — 2026-05-25
+
+Headline: a small read-only frontend lands so humans can browse the same
+knowledge graph the agents read and write to. Plus a YouTube walkthrough
+linked from the README, and the merged contribution from @WarGloom that
+tightens up the relations endpoints.
+
+### Added
+
+- **Frontend** (`frontend/`): vanilla-JS, no build step, no npm.
+  - **Reader** — left rail wiki index + elastic-debounced semantic search
+    with type-pill breakdown, central wiki body with citation chips,
+    right-rail Relations panel that resolves every endpoint to a readable
+    chip (type pill + canonical name) rather than a raw UUID.
+  - **Graph** — force-layout view with custom shapes per entity type.
+    Physics is one-shot (off after first settle) and new nodes added on
+    expansion are placed in a deterministic ring around the click target,
+    so the graph never drifts under the user's mouse. Zoom buttons,
+    scroll-wheel zoom, drag-pan, retired-wiki badge in the search dropdown.
+  - **Ops** — pipeline-queue and activity-log tables with actor pills
+    (Maintainer / Writer / Scheduler / Watcher), readable target-wiki +
+    entity chips, zebra stripes, and a NOTE column that distinguishes
+    benign rationale from real errors.
+  - **Ask drawer** — a textarea that posts to the agent endpoint
+    (`POST /api/v1/agent/query`) with the same async semantics as the
+    Claude Code skill (long calls supported).
+  - **Universal entity-chip resolver**: a small async helper is wired into
+    every render site that previously showed a UUID — relations, jobs,
+    log rows, drawer titles. Cached after first fetch.
+- **YouTube walkthrough**: linked from `README.md`
+  ([youtu.be/AJ7iMOj4vvA](https://youtu.be/AJ7iMOj4vvA)).
+- **README**: new "Frontend (optional, read-only)" section with one-line
+  serve instructions.
+
+### Changed
+
+- **Relations endpoint hardening** — merges @WarGloom's
+  [PR #5](https://github.com/dimknaf/braindb/pull/5): missing relation
+  endpoints now reject cleanly instead of returning a confusing 200.
+
 ## [0.2.0] — 2026-05-24
 
 The first substantial release beyond the v0.1.0 memory-store baseline. The
