@@ -112,10 +112,10 @@ async def recall_memory(
     queries: list[str],
     max_results: int = settings.recall_default_max_results,
 ) -> str:
-    """Search BrainDB memory with multiple natural language queries.
+    """⭐ Primary recall tool — use FIRST for ANY "what do we know about X" question.
+
     Runs fuzzy + fulltext + keyword embedding search, merges with geometric mean,
     traverses the graph up to 3 hops, applies temporal decay.
-    Use this as the primary recall tool.
 
     QUERY STRATEGY — IMPORTANT for high-recall on narrow subjects:
 
@@ -634,7 +634,9 @@ async def delete_relation(relation_id: str) -> str:
 @function_tool
 @_verbose("view_tree")
 async def view_tree(entity_id: str, max_depth: int = 2) -> str:
-    """View the graph of connections around an entity (incoming + outgoing).
+    """⭐ Use when you already have an entity ID and want its 1-N hop neighbourhood
+    with relation types and edge scores. Preferred over search_sql for any
+    "what's around this entity" question — SQL can't show the chain in one call.
 
     Args:
         entity_id: UUID of the root entity.
@@ -668,7 +670,10 @@ async def view_tree(entity_id: str, max_depth: int = 2) -> str:
 @function_tool
 @_verbose("search_sql")
 async def search_sql(query: str) -> str:
-    """Run a read-only SQL query (SELECT/WITH only). Use for complex exploration.
+    """⚠ Aggregates ONLY (counts, GROUP BY, joins for stats). NEVER for recall /
+    discovery / understanding — that's recall_memory. NEVER for "what's around
+    this entity" — that's view_tree. If you're using SQL to find or understand
+    something, stop and pick the right tool.
 
     Args:
         query: SQL query — must start with SELECT or WITH.

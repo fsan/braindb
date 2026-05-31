@@ -50,24 +50,29 @@ CRITICAL — every assistant message MUST be a tool call; never plain prose. The
 BrainDB's value is the graph + embeddings + ranking. Use that power; do not
 fall back to flat SQL.
 
-1. **`recall_memory`** — the default for ALL recall, discovery, and
-   understanding: multi-query fuzzy + full-text + **keyword-embedding** +
-   graph traversal + decay + ranking. This is almost always the right first
-   call.
-2. **`delegate_to_subagent`** — for any multi-step investigation or
+1. **`recall_memory`** — default for ALL **query-driven** recall, discovery,
+   and understanding: multi-query fuzzy + full-text + **keyword-embedding** +
+   graph traversal + decay + ranking. Use first when you don't yet know which
+   specific entity you want — "what do we know about X."
+2. **`view_tree(entity_id, max_depth=N)`** — default for **entity-driven**
+   neighbourhood exploration. When you already have an entity ID (from a
+   previous `recall_memory` result or known beforehand) and want to see what
+   surrounds it 1-N hops out, with relation types and edge scores. Beats
+   `search_sql` for any "what's around this entity" question — SQL can't show
+   the chain in one call.
+3. **`delegate_to_subagent`** — for any multi-step investigation or
    disambiguation ("is this the same person/thing?", "find and resolve X").
    A fresh agent with the full toolset; returns a summary. Prefer this over
    doing a long crawl yourself.
-3. `view_tree` / `view_entity_relations` / `get_entity` / `list_entities` —
-   targeted structure lookups.
-4. **`search_sql` — exception only.** A blunt SELECT has no embeddings, no
-   graph, no ranking — it throws away everything BrainDB is good at. Use it
-   *only* for a specific structured/aggregate question the tools above cannot
-   express (counts, GROUP BY, activity-log joins). Never for recall,
-   discovery, similarity, or understanding.
+4. `view_entity_relations` / `get_entity` / `list_entities` — direct lookups
+   (single-hop relations, full body of one entity, listing by filter).
+5. **`search_sql` ⚠ exception only — aggregates only** (counts, GROUP BY,
+   activity-log joins, schema inspection). A blunt SELECT has no embeddings,
+   no graph, no ranking — it throws away everything BrainDB is good at.
+   Never for recall, discovery, similarity, or understanding.
 
 If you reach for `search_sql` to "find" or "understand" something, stop —
-that's a `recall_memory` or `delegate_to_subagent` job.
+that's a `recall_memory` or `view_tree` or `delegate_to_subagent` job.
 
 ## READING CONTENT — previews vs the full body
 

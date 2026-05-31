@@ -26,18 +26,30 @@ BrainDB has its own internal agent (LiteLLM with pluggable provider via `LLM_PRO
 
 ---
 
-## TOOL PRIORITY
+## TOOL PRIORITY (read this first)
 
-The agent already uses the sophisticated retrieval (keyword-mediated fuzzy +
-embedding + graph + ranking, with a two-level diversity quota) and can
-delegate to subagents. Phrase requests as goals ("find / recall / understand
-…", "delegate a deep investigation of …"). **Do not tell it to "run SQL"**
-for recall or understanding — raw SQL discards the graph and embeddings. If
-you're tempted to phrase a request as *"run a SQL query that finds…"* for
-*finding* or *understanding* something, stop — that's the sophisticated
-recall path's job. Ask in plain English. SQL is only ever for an explicit
-aggregate ("how many facts per source?"), which you can simply ask for in
-plain English anyway.
+The agent has a clear order of tools it should reach for. When you phrase a
+request, lean into the sophisticated tools — don't ask it to "run SQL" for
+anything to do with recall or understanding.
+
+1. **Query-driven recall** — *"what do we know about X?"* → the agent calls
+   `/memory/context` (keyword-mediated fuzzy + embedding + graph + ranking,
+   with diversity quotas). The default for ALL discovery and understanding.
+2. **Entity-driven neighbourhood** — *"what's connected to entity Y?"* (once
+   you have an ID from a previous recall) → the agent calls `/memory/tree/<id>`.
+   Returns the multi-hop neighbourhood with relation types and edge scores in
+   one call. Use this instead of SQL for "around this entity" questions.
+3. **Multi-step investigation** — *"investigate / disambiguate / resolve X"*
+   → the agent delegates to a subagent. Keeps the main context clean.
+4. **Direct lookups** — `view_entity_relations`, `get_entity`, `list_entities`
+   for narrow questions.
+5. **`search_sql` ⚠ exception only** — for explicit aggregates (counts,
+   GROUP BY, activity-log joins). Never for finding / understanding /
+   "what's related to" — those are jobs for the tools above.
+
+If you're tempted to phrase a request as *"run a SQL query that finds…"* for
+*finding* or *understanding* something, stop — that's the recall or tree
+path's job. Ask in plain English.
 
 **Wikis** are first-class memory entities curated by an internal maintainer +
 writer pipeline. The agent surfaces them through recall automatically when

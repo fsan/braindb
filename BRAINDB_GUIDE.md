@@ -5,6 +5,26 @@ The API runs at **http://localhost:8000**. Everything is done via HTTP calls.
 
 ---
 
+## ⚠ TOOL PRIORITY (read this first)
+
+BrainDB's value is the graph + embeddings + ranking. Use that power; do not
+fall back to flat SQL.
+
+1. **`POST /api/v1/memory/context`** — default for **query-driven** recall,
+   discovery, understanding ("what do we know about X?"). Keyword-mediated
+   fuzzy + embeddings + graph + ranking.
+2. **`GET /api/v1/memory/tree/<id>?max_depth=N`** — default for **entity-driven**
+   neighbourhood exploration ("what's around entity Y?"). Returns the chain
+   with relation types and edge scores in one call.
+3. **`POST /api/v1/agent/query`** ("delegate to a subagent") — for multi-step
+   investigation / disambiguation.
+4. `GET /api/v1/entities…` and `/entities/<id>/relations` — direct lookups.
+5. **`POST /api/v1/memory/sql` ⚠ exception only** — aggregates (counts,
+   GROUP BY, activity-log joins). NEVER for recall, discovery, similarity,
+   understanding, or "what's around this entity" — those are the tools above.
+
+---
+
 ## Entity Types
 
 | Type | What to store |
