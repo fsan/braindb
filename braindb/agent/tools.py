@@ -643,29 +643,76 @@ async def view_tree(entity_id: str, max_depth: int = 2) -> str:
         entity_id: UUID of the root entity.
         max_depth: How far to traverse (1-3, default 2).
     """
+    if max_depth < 1 or max_depth > 3:
+        return _err("max_depth must be 1-3")
     try:
         with get_conn() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(
-                    """SELECT e.*, r.relation_type, r.relevance_score, r.description AS rel_desc,
-                              CASE WHEN r.from_entity_id = %s THEN 'out' ELSE 'in' END AS dir
-                       FROM relations r
-                       JOIN entities e ON e.id = CASE WHEN r.from_entity_id = %s THEN r.to_entity_id ELSE r.from_entity_id END
-                       WHERE r.from_entity_id = %s OR r.to_entity_id = %s""",
-                    (entity_id, entity_id, entity_id, entity_id),
+                    "SELECT id, entity_type, content FROM entities WHERE id = %s",
+                    (entity_id,),
+                )
+                root = cur.fetchone()
+                if not root:
+                    return _err(f"Entity not found: {entity_id}")
+                # Recursive bidirectional walk, respects max_depth.
+                cur.execute(
+                    """WITH RECURSIVE traversal AS (
+                        SELECT e.id, e.entity_type, e.content,
+                               0 AS depth, ARRAY[e.id] AS visited,
+                               NULL::TEXT AS via_rel,
+                               NULL::FLOAT AS edge_score,
+                               NULL::TEXT AS direction
+                        FROM entities e WHERE e.id = %s
+                        UNION ALL
+                        SELECT target.id, target.entity_type, target.content,
+                               t.depth + 1, t.visited || target.id,
+                               r.relation_type, r.relevance_score,
+                               CASE WHEN r.from_entity_id = t.id THEN 'out' ELSE 'in' END
+                        FROM traversal t
+                        JOIN relations r ON r.from_entity_id = t.id OR r.to_entity_id = t.id
+                        JOIN entities target ON target.id = CASE
+                            WHEN r.from_entity_id = t.id THEN r.to_entity_id
+                            ELSE r.from_entity_id END
+                        WHERE t.depth < %s AND NOT (target.id = ANY(t.visited))
+                    )
+                    SELECT DISTINCT ON (id) id, entity_type, content, depth,
+                           via_rel, edge_score, direction
+                    FROM traversal WHERE depth > 0
+                    ORDER BY id, depth, edge_score DESC NULLS LAST
+                    """,
+                    (entity_id, max_depth),
                 )
                 rows = [dict(r) for r in cur.fetchall()]
+        out = [f"ROOT [{root['entity_type']}] {_tree_label(root)} (id: {root['id']})"]
         if not rows:
-            return "No connections."
-        lines = [f"{len(rows)} connections from {entity_id}:"]
+            out.append("\n(no connections)")
+            return _truncate("\n".join(out))
+        rows.sort(key=lambda x: (x['depth'], -(x['edge_score'] or 0)))
+        last_depth = None
         for r in rows:
-            lines.append(
-                f"  [{r['dir']}] {r['relation_type']} (rel={r['relevance_score']})\n"
-                f"    [{r['entity_type']}] {r['content'][:80]} (id: {r['id']})"
+            if r['depth'] != last_depth:
+                same_depth_n = sum(1 for x in rows if x['depth'] == r['depth'])
+                out.append(f"\nDEPTH {r['depth']} ({same_depth_n}):")
+                last_depth = r['depth']
+            out.append(
+                f"  [{r['direction']}] {r['via_rel']} (rel={r['edge_score']})\n"
+                f"    [{r['entity_type']}] {_tree_label(r)} (id: {r['id']})"
             )
-        return _truncate("\n".join(lines))
+        return _truncate("\n".join(out))
     except Exception as e:
         return _err(str(e))
+
+
+def _tree_label(entity: dict) -> str:
+    """Short label for tree output. Wikis use canonical_name; others truncate content."""
+    import re as _r
+    content = (entity.get('content') or '').replace('\n', ' ')
+    if entity.get('entity_type') == 'wiki':
+        m = _r.search(r'canonical_name=([^\s]+)', content)
+        if m:
+            return m.group(1)
+    return content[:80]
 
 
 @function_tool
