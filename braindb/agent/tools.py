@@ -646,58 +646,30 @@ async def view_tree(entity_id: str, max_depth: int = 2) -> str:
     if max_depth < 1 or max_depth > 3:
         return _err("max_depth must be 1-3")
     try:
+        from braindb.services.tree import build_entity_tree
         with get_conn() as conn:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute(
-                    "SELECT id, entity_type, content FROM entities WHERE id = %s",
-                    (entity_id,),
-                )
-                root = cur.fetchone()
-                if not root:
-                    return _err(f"Entity not found: {entity_id}")
-                # Recursive bidirectional walk, respects max_depth.
-                cur.execute(
-                    """WITH RECURSIVE traversal AS (
-                        SELECT e.id, e.entity_type, e.content,
-                               0 AS depth, ARRAY[e.id] AS visited,
-                               NULL::TEXT AS via_rel,
-                               NULL::FLOAT AS edge_score,
-                               NULL::TEXT AS direction
-                        FROM entities e WHERE e.id = %s
-                        UNION ALL
-                        SELECT target.id, target.entity_type, target.content,
-                               t.depth + 1, t.visited || target.id,
-                               r.relation_type, r.relevance_score,
-                               CASE WHEN r.from_entity_id = t.id THEN 'out' ELSE 'in' END
-                        FROM traversal t
-                        JOIN relations r ON r.from_entity_id = t.id OR r.to_entity_id = t.id
-                        JOIN entities target ON target.id = CASE
-                            WHEN r.from_entity_id = t.id THEN r.to_entity_id
-                            ELSE r.from_entity_id END
-                        WHERE t.depth < %s AND NOT (target.id = ANY(t.visited))
-                    )
-                    SELECT DISTINCT ON (id) id, entity_type, content, depth,
-                           via_rel, edge_score, direction
-                    FROM traversal WHERE depth > 0
-                    ORDER BY id, depth, edge_score DESC NULLS LAST
-                    """,
-                    (entity_id, max_depth),
-                )
-                rows = [dict(r) for r in cur.fetchall()]
+            tree = build_entity_tree(conn, entity_id, max_depth)
+        if tree is None:
+            return _err(f"Entity not found: {entity_id}")
+        root = tree["root"]
+        conns = tree["connections"]
         out = [f"ROOT [{root['entity_type']}] {_tree_label(root)} (id: {root['id']})"]
-        if not rows:
+        if not conns:
             out.append("\n(no connections)")
             return _truncate("\n".join(out))
-        rows.sort(key=lambda x: (x['depth'], -(x['edge_score'] or 0)))
+        # Group output by depth
         last_depth = None
-        for r in rows:
-            if r['depth'] != last_depth:
-                same_depth_n = sum(1 for x in rows if x['depth'] == r['depth'])
-                out.append(f"\nDEPTH {r['depth']} ({same_depth_n}):")
-                last_depth = r['depth']
+        for c in conns:
+            d = c["depth"]
+            if d != last_depth:
+                same_n = sum(1 for x in conns if x["depth"] == d)
+                out.append(f"\nDEPTH {d} ({same_n}):")
+                last_depth = d
+            ent = c["entity"]
+            dir_short = "out" if c.get("direction") == "outgoing" else "in"
             out.append(
-                f"  [{r['direction']}] {r['via_rel']} (rel={r['edge_score']})\n"
-                f"    [{r['entity_type']}] {_tree_label(r)} (id: {r['id']})"
+                f"  [{dir_short}] {c['via_relation_type']} (rel={c['relevance']})\n"
+                f"    [{ent['entity_type']}] {_tree_label(ent)} (id: {ent['id']})"
             )
         return _truncate("\n".join(out))
     except Exception as e:
