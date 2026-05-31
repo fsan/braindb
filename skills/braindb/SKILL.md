@@ -97,12 +97,11 @@ to flat SQL.
    `tagged_with`). A two-level diversity quota (per-search-term +
    per-keyword halving) keeps results balanced. Then graph traversal + decay
    + ranking.
-2. **`GET /api/v1/memory/tree/<id>?max_depth=N`** — the default for
-   **entity-driven** neighbourhood exploration ("what's around entity Y?"
-   when you already have an ID from a previous recall). Returns the multi-hop
-   neighbourhood in ONE call, with relation types and edge scores. Beats
-   `/memory/sql` for any "what's connected to X" question — SQL can't show
-   the chain in a single call.
+2. **`GET /api/v1/memory/tree/<id>?max_depth=N`** — reveals an entity's
+   connections in one call: relations + 1-N hop neighbours + edge scores.
+   Especially useful when you have an entity ID (from a previous recall)
+   and want its graph context — often a sharper choice than another
+   `/memory/context` call about the same entity.
 3. **`POST /api/v1/agent/query` with "delegate to a subagent…"** — for
    multi-step investigation/disambiguation; the agent researches and returns
    a summary.

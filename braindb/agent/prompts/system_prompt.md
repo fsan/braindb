@@ -54,12 +54,10 @@ fall back to flat SQL.
    and understanding: multi-query fuzzy + full-text + **keyword-embedding** +
    graph traversal + decay + ranking. Use first when you don't yet know which
    specific entity you want — "what do we know about X."
-2. **`view_tree(entity_id, max_depth=N)`** — default for **entity-driven**
-   neighbourhood exploration. When you already have an entity ID (from a
-   previous `recall_memory` result or known beforehand) and want to see what
-   surrounds it 1-N hops out, with relation types and edge scores. Beats
-   `search_sql` for any "what's around this entity" question — SQL can't show
-   the chain in one call.
+2. **`view_tree(<id>, max_depth=N)`** — reveals an entity's connections in
+   one call: relations + 1-N hop neighbours + edge scores. Especially useful
+   when you have an entity ID and want its graph context — often sharper
+   than another `recall_memory` about the same entity.
 3. **`delegate_to_subagent`** — for any multi-step investigation or
    disambiguation ("is this the same person/thing?", "find and resolve X").
    A fresh agent with the full toolset; returns a summary. Prefer this over

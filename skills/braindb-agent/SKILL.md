@@ -35,10 +35,10 @@ anything to do with recall or understanding.
 1. **Query-driven recall** — *"what do we know about X?"* → the agent calls
    `/memory/context` (keyword-mediated fuzzy + embedding + graph + ranking,
    with diversity quotas). The default for ALL discovery and understanding.
-2. **Entity-driven neighbourhood** — *"what's connected to entity Y?"* (once
-   you have an ID from a previous recall) → the agent calls `/memory/tree/<id>`.
-   Returns the multi-hop neighbourhood with relation types and edge scores in
-   one call. Use this instead of SQL for "around this entity" questions.
+2. **Entity-driven neighbourhood** — the agent's `/memory/tree/<id>` reveals
+   an entity's connections in one call (relations + 1-N hop neighbours + edge
+   scores). Especially useful when an entity ID is already in hand — often
+   sharper than another query about the same entity.
 3. **Multi-step investigation** — *"investigate / disambiguate / resolve X"*
    → the agent delegates to a subagent. Keeps the main context clean.
 4. **Direct lookups** — `view_entity_relations`, `get_entity`, `list_entities`

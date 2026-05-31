@@ -634,9 +634,10 @@ async def delete_relation(relation_id: str) -> str:
 @function_tool
 @_verbose("view_tree")
 async def view_tree(entity_id: str, max_depth: int = 2) -> str:
-    """⭐ Use when you already have an entity ID and want its 1-N hop neighbourhood
-    with relation types and edge scores. Preferred over search_sql for any
-    "what's around this entity" question — SQL can't show the chain in one call.
+    """⭐ Reveals an entity's connections in one call: relations + 1-N hop
+    neighbours + edge scores. Especially useful when you have an entity ID
+    (from a previous result) and want its graph context — often a sharper
+    choice than another `recall_memory` about the same entity.
 
     Args:
         entity_id: UUID of the root entity.

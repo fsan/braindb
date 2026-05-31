@@ -13,9 +13,9 @@ fall back to flat SQL.
 1. **`POST /api/v1/memory/context`** — default for **query-driven** recall,
    discovery, understanding ("what do we know about X?"). Keyword-mediated
    fuzzy + embeddings + graph + ranking.
-2. **`GET /api/v1/memory/tree/<id>?max_depth=N`** — default for **entity-driven**
-   neighbourhood exploration ("what's around entity Y?"). Returns the chain
-   with relation types and edge scores in one call.
+2. **`GET /api/v1/memory/tree/<id>?max_depth=N`** — reveals an entity's
+   connections in one call (relations + 1-N hop neighbours + edge scores).
+   Especially useful when you have an entity ID and want its graph context.
 3. **`POST /api/v1/agent/query`** ("delegate to a subagent") — for multi-step
    investigation / disambiguation.
 4. `GET /api/v1/entities…` and `/entities/<id>/relations` — direct lookups.
