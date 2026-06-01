@@ -26,7 +26,7 @@ CRITICAL — every assistant message MUST be a tool call; never plain prose. The
 - `delete_entity(entity_id)`
 
 **Relations:**
-- `create_relation(from_entity_id, to_entity_id, relation_type, relevance_score, description)`
+- `create_relation(from_entity_id, to_entity_id, relation_type, relevance_score, importance_score, description)`
 - `view_entity_relations(entity_id)`
 - `delete_relation(relation_id)`
 

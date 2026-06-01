@@ -34,6 +34,7 @@ WITH RECURSIVE traversal AS (
         (
             t.accumulated_relevance
             * r.relevance_score
+            * COALESCE(r.importance_score, 0.5)
             * CASE t.depth + 1
                 WHEN 1 THEN 1.0
                 WHEN 2 THEN 0.8
@@ -47,10 +48,7 @@ WITH RECURSIVE traversal AS (
         r.notes,
         t.seed_origin_id
     FROM traversal t
-    JOIN relations r ON (
-        r.from_entity_id = t.id
-        OR (r.is_bidirectional AND r.to_entity_id = t.id)
-    )
+    JOIN relations r ON r.from_entity_id = t.id OR r.to_entity_id = t.id
     JOIN entities target ON
         target.id = CASE
             WHEN r.from_entity_id = t.id THEN r.to_entity_id
@@ -61,6 +59,7 @@ WITH RECURSIVE traversal AS (
       AND (
             t.accumulated_relevance
             * r.relevance_score
+            * COALESCE(r.importance_score, 0.5)
             * CASE t.depth + 1 WHEN 1 THEN 1.0 WHEN 2 THEN 0.8 ELSE 0.6 END
           ) > %s
 )

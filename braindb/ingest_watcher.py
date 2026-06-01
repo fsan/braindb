@@ -46,7 +46,7 @@ CHUNK_WORDS = 600           # target chunk size (~4-5k token context per extract
 CHUNK_OVERLAP = 75          # words of overlap between adjacent chunks — catches facts that span a boundary
 
 INGEST_TIMEOUT = 60
-AGENT_TIMEOUT = 600          # NIM free tier is slow/flaky on gemma-4-31b; generous timeout gives retries room to succeed
+AGENT_TIMEOUT = int(os.getenv("AGENT_TIMEOUT", "1200"))   # env-overridable; matches wiki_scheduler pattern. Generous default for slow / deep-exploring LLM runs.
 UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
 logging.basicConfig(
@@ -157,13 +157,15 @@ def extract_facts_from_chunk(ds_id: str, title: str, idx: int, total: int, chunk
         f"numbers, events, named decisions. Ignore filler, opinion, and generic\n"
         f"statements. Aim for quality over quantity: typically 3-8 facts per chunk.\n\n"
         f"For EACH fact:\n"
-        f'  a) Call save_fact(content="<the fact in one sentence>", certainty=0.8,\n'
-        f'     source="document", keywords=[2-4 precise tags], importance=0.6,\n'
-        f'     notes="Extracted from {title} chunk {idx}/{total}"). Record the\n'
-        f"     returned fact id.\n"
+        f'  a) Call save_fact(content="<the fact in one sentence>",\n'
+        f'     source="document", keywords=[2-4 precise tags],\n'
+        f'     notes="Extracted from {title} chunk {idx}/{total}"). Judge\n'
+        f"     certainty and importance per the tool's docstring guidance.\n"
+        f"     Record the returned fact id.\n"
         f"  b) Call create_relation(from_entity_id=<fact_id>, "
         f'to_entity_id="{ds_id}", relation_type="derived_from",\n'
-        f'     relevance_score=0.9, description="Fact extracted from {title}").\n\n'
+        f'     description="Fact extracted from {title}"). Judge\n'
+        f"     relevance_score and importance_score per the tool's docstring.\n\n"
         f"Do NOT call get_entity. Do NOT call update_entity on the datasource.\n"
         f"Do NOT touch the datasource content — it is read-only.\n\n"
         f"When all facts in this chunk are processed, call final_answer with\n"
@@ -210,7 +212,8 @@ def central_review(ds_id: str, title: str, fact_ids: list[str]) -> None:
         f"   or is_example_of. Only create relations that are genuinely meaningful.\n"
         f"2. If the set as a whole suggests a broader observation or inference that\n"
         f"   none of the individual facts capture, call save_thought with that\n"
-        f"   thought (certainty=0.6-0.8, source='agent-inference') and then\n"
+        f"   thought (source='agent-inference'; judge certainty + importance per\n"
+        f"   the tool docstring) and then\n"
         f'   create_relation(thought_id, "{ds_id}", "elaborates").\n'
         f"3. Optionally run recall_memory with 1-2 queries derived from the facts\n"
         f"   to find related EXISTING entities in memory. If any are clearly\n"

@@ -542,7 +542,8 @@ async def create_relation(
     from_entity_id: str,
     to_entity_id: str,
     relation_type: str,
-    relevance_score: float = 0.7,
+    relevance_score: float = 0.5,
+    importance_score: float = 0.5,
     description: Optional[str] = None,
 ) -> str:
     """Create a relation between two entities.
@@ -551,7 +552,8 @@ async def create_relation(
         from_entity_id: Source entity UUID.
         to_entity_id: Target entity UUID.
         relation_type: One of: supports, contradicts, elaborates, refers_to, derived_from, similar_to, is_example_of, challenges, tagged_with.
-        relevance_score: 0-1 (default 0.7).
+        relevance_score: 0-1 — how tight the semantic link is (0.9 = strong, 0.5 = neutral / "didn't judge", 0.2 = weak).
+        importance_score: 0-1 — how much losing this edge would degrade recall (0.9 = critical, 0.5 = neutral / "didn't judge", 0.2 = trivial).
         description: Why this relation exists.
     """
     try:
@@ -559,9 +561,9 @@ async def create_relation(
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 try:
                     cur.execute(
-                        """INSERT INTO relations (from_entity_id, to_entity_id, relation_type, relevance_score, description)
-                           VALUES (%s, %s, %s, %s, %s) RETURNING id""",
-                        (from_entity_id, to_entity_id, relation_type, relevance_score, description),
+                        """INSERT INTO relations (from_entity_id, to_entity_id, relation_type, relevance_score, importance_score, description)
+                           VALUES (%s, %s, %s, %s, %s, %s) RETURNING id""",
+                        (from_entity_id, to_entity_id, relation_type, relevance_score, importance_score, description),
                     )
                     rid = cur.fetchone()["id"]
                 except psycopg2.errors.UniqueViolation:
