@@ -11,6 +11,7 @@ in the automated suite. The behavior was manually verified during Phase A
 end-to-end ingestion: the Smart Sand article's 10,357-char content was
 preserved across three full runs of the watcher's chunked pipeline.
 """
+import uuid
 from pathlib import Path
 
 import requests
@@ -56,7 +57,8 @@ def _find_datasource_by_title(api: str, title: str) -> dict | None:
 
 def test_ingest_new_returns_201(api, created_entities):
     """First ingest of a fresh file returns 201."""
-    content = "A unique pytest ingest-test body. " * 10
+    # Unique per-run content so prior runs' rows in the DB can't dedup-fire on us.
+    content = f"A unique pytest ingest-test body {uuid.uuid4().hex}. " * 10
     _write_sample(content)
     try:
         r = requests.post(
@@ -80,7 +82,8 @@ def test_ingest_new_returns_201(api, created_entities):
 
 def test_ingest_duplicate_returns_200(api, created_entities):
     """Second ingest with the same bytes returns 200 (idempotent)."""
-    content = "Idempotency pytest body. " * 15
+    # Unique per-run content so prior runs' rows in the DB can't dedup-fire on us.
+    content = f"Idempotency pytest body {uuid.uuid4().hex}. " * 15
     _write_sample(content)
     try:
         # First call — 201
@@ -120,7 +123,8 @@ def test_ingest_dup_preserves_first_seen_metadata(api, created_entities):
     with new metadata). A second ingest with different keywords must not
     overwrite the first-seen keywords or swap the id.
     """
-    content = "Dup-metadata pytest body. " * 20
+    # Unique per-run content so prior runs' rows in the DB can't dedup-fire on us.
+    content = f"Dup-metadata pytest body {uuid.uuid4().hex}. " * 20
     _write_sample(content)
     try:
         r1 = requests.post(
