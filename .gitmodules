@@ -1,0 +1,3 @@
+[submodule "benchmarks/beam/upstream"]
+	path = benchmarks/beam/upstream
+	url = https://github.com/mohammadtavakoli78/BEAM.git

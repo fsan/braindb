@@ -1,0 +1,133 @@
+# Standalone bench stack — NOT an overlay on docker-compose.yml.
+#
+# Runs alongside the personal BrainDB stack with strict isolation at every
+# layer: separate Docker project namespace, separate Postgres container,
+# separate volume, separate ports, separate host data dir. The personal
+# `braindb` database is never touched by anything here.
+#
+# Run with:
+#   docker compose -f docker-compose.bench.yml --env-file .env.bench up
+#
+# Plain `docker compose up` runs the personal stack as normal — the bench
+# stack cannot fire by accident.
+#
+# Safety properties (also enforced by code in benchmarks/beam/bench.py):
+#   - Postgres database is named `braindb_bench` (never `braindb`)
+#   - Postgres runs in its OWN container on host port 5433 (not 5432)
+#   - The bench BrainDB API is on host port 8001 (not 8000)
+#   - The bench watcher mounts ./data_bench/ as /app/data, so it never
+#     sees files in ./data/ (the personal watcher's directory)
+#   - The bench runner asserts the active DATABASE_URL contains
+#     `braindb_bench` before any destructive op; refuses otherwise
+
+name: braindb_bench
+
+services:
+  postgres_bench:
+    # pgvector + pg_trgm baked in; matches what alembic migrations expect.
+    image: pgvector/pgvector:pg17
+    container_name: braindb_bench_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: braindb_bench
+      POSTGRES_USER: braindb_bench
+      # NOT a secret — bench-local only, never reachable from outside the
+      # host. The hard-coded safety check in bench.py looks for the
+      # literal "braindb_bench" substring in DATABASE_URL.
+      POSTGRES_PASSWORD: bench_local_only
+    ports:
+      - "5433:5432"
+    volumes:
+      - braindb_bench_pgdata:/var/lib/postgresql/data
+    networks:
+      - bench-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U braindb_bench -d braindb_bench"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api_bench:
+    build: .
+    container_name: braindb_bench_api
+    restart: unless-stopped
+    depends_on:
+      postgres_bench:
+        condition: service_healthy
+    networks:
+      - bench-network
+    environment:
+      # MUST contain "braindb_bench" or the bench runner refuses to start.
+      DATABASE_URL: postgresql://braindb_bench:bench_local_only@postgres_bench:5432/braindb_bench
+      API_PORT: 8001
+      HF_TOKEN: ${HF_TOKEN:-}
+      # Bench defaults to local Qwen via the workstation tunnel — matches the
+      # plan's Qwen-as-judge story. Override via .env.bench if needed.
+      LLM_PROFILE: ${LLM_PROFILE_BENCH:-vllm_workstation_qwen}
+      AGENT_MODEL: ${AGENT_MODEL:-}
+      NVIDIA_NIM_API_KEY: ${NVIDIA_NIM_API_KEY:-}
+      DEEPINFRA_API_KEY: ${DEEPINFRA_API_KEY:-}
+      VLLM_API_KEY: ${VLLM_API_KEY:-EMPTY}
+      # Verbose by default during bench — every tool call is logged so the
+      # smoke tests can be audited.
+      AGENT_VERBOSE: ${AGENT_VERBOSE_BENCH:-true}
+      # Bench-specific tuning: wiki maintenance fires faster than prod's
+      # 30-min freshness window so per-conversation warmup stays in minutes.
+      WIKI_FRESHNESS_MINUTES: ${WIKI_FRESHNESS_MINUTES_BENCH:-1}
+    extra_hosts:
+      # Lets self-hosted profiles (vllm_workstation_qwen) reach a server
+      # bound to the Docker host's loopback or the SSH tunnel.
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "8001:8001"
+    volumes:
+      # Bind the repo (for code reload) but OVERRIDE /app/data with the
+      # bench-only directory. The personal watcher polls ./data/sources/;
+      # the bench watcher polls ./data_bench/sources/. They cannot see
+      # each other's files.
+      - .:/app
+      - ./data_bench:/app/data
+    command: >
+      sh -c "alembic upgrade head && uvicorn braindb.main:app --host 0.0.0.0 --port 8001"
+
+  watcher_bench:
+    build: .
+    container_name: braindb_bench_watcher
+    restart: unless-stopped
+    depends_on:
+      - api_bench
+    networks:
+      - bench-network
+    environment:
+      BRAINDB_API_URL: http://api_bench:8001
+      # Faster poll than prod's 7s, so the smoke test feels responsive.
+      INGEST_POLL_INTERVAL: ${INGEST_POLL_INTERVAL_BENCH:-3}
+    volumes:
+      - .:/app
+      - ./data_bench:/app/data
+    command: python -m braindb.ingest_watcher
+
+  wiki_scheduler_bench:
+    build: .
+    container_name: braindb_bench_wiki_scheduler
+    restart: unless-stopped
+    depends_on:
+      - api_bench
+    networks:
+      - bench-network
+    environment:
+      BRAINDB_API_URL: http://api_bench:8001
+      # Wiki pipeline runs identical to prod — only the cadence changes.
+      WIKI_ENABLED: 'true'
+      WIKI_INTERVAL: ${WIKI_INTERVAL_BENCH:-5}
+    volumes:
+      - .:/app
+    command: python -m braindb.wiki_scheduler
+
+volumes:
+  braindb_bench_pgdata:
+    name: braindb_bench_pgdata
+
+networks:
+  bench-network:
+    name: braindb_bench_network

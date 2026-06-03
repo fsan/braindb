@@ -39,3 +39,22 @@ data/sources/*
 
 # Wiki review exports — generated, read-only inspection output
 data/wiki_review/
+
+# --- Benchmarks ---
+# Personal A/B bench content (5-Q personal recall + run traces) — local only,
+# tied to the user's own BrainDB content, not for the public repo.
+benchmarks/README.md
+benchmarks/questions.json
+benchmarks/run_agent.sh
+benchmarks/runs/
+
+# Generated artefacts inside any public benchmark subdir (e.g. benchmarks/beam/)
+# — full LLM traces, dataset caches, per-question JSONLs. Only results/*.md
+# gets committed.
+benchmarks/*/runs/
+benchmarks/*/dataset_cache/
+benchmarks/*/answers/
+
+# Bench compose: separate host data dir for the bench watcher, separate env file
+data_bench/
+.env.bench
