@@ -91,28 +91,41 @@ BrainDB's power is the graph + embeddings + ranking. Use it; do not fall back
 to flat SQL.
 
 1. **`POST /api/v1/memory/context`** (multi-query) — the default for ALL
-   recall, discovery, and understanding. BOTH the fuzzy and embedding
-   pathways are **keyword-mediated** (the query matches against keyword
-   entities, entities surface via `tagged_with`). A two-level diversity
-   quota (per-search-term + per-keyword halving) keeps results
-   balanced. Then graph traversal + decay + ranking.
-2. **`POST /api/v1/agent/query` with "delegate to a subagent…"** — for
-   multi-step investigation/disambiguation; the agent researches and returns a
-   summary.
-3. `GET /api/v1/entities…`, `GET /api/v1/memory/tree/<id>`,
-   `GET /api/v1/entities/<id>/relations` — targeted structure lookups.
-4. **Wikis** — first-class entity type, curated topic pages assembled by an
+   **query-driven** recall, discovery, and understanding ("what do we know
+   about X?"). BOTH the fuzzy and embedding pathways are **keyword-mediated**
+   (the query matches against keyword entities, entities surface via
+   `tagged_with`). A two-level diversity quota (per-search-term +
+   per-keyword halving) keeps results balanced. Then graph traversal + decay
+   + ranking.
+2. **`GET /api/v1/memory/tree/<id>?max_depth=N`** — reveals an entity's
+   neighbourhood as a nested JSON tree: root keyed by `entity_type`,
+   `children` arrays per node, 1-N hops out, keyword + retired-wiki
+   noise filtered by default, `_truncated` marker as a last child if
+   more remain. Especially useful when you have an entity ID (from a
+   previous recall) and want its graph context — often a sharper choice
+   than another `/memory/context` call about the same entity. On hub
+   entities (wikis with many connections) pass `max_depth=3` to see
+   narrative chains.
+3. **`POST /api/v1/agent/query` with "delegate to a subagent…"** — for
+   multi-step investigation/disambiguation; the agent researches and returns
+   a summary.
+4. `GET /api/v1/entities…`, `GET /api/v1/entities/<id>/relations` — direct
+   lookups (list-by-filter, single-hop relations).
+5. **Wikis** — first-class entity type, curated topic pages assembled by an
    internal maintainer + writer pipeline from facts/thoughts tagged with the
    same keyword. To browse: `GET /api/v1/entities?entity_type=wiki`. Full body:
    `GET /api/v1/entities/<id>`. Wikis also surface naturally in `/memory/context`.
    Write paths are documented in the WIKIS section below.
-5. **`POST /api/v1/memory/sql` — exception only.** A flat SELECT has no
-   embeddings/graph/ranking. Use it solely for a specific structured/aggregate
-   question (counts, GROUP BY, activity-log joins) the above cannot express.
-   **Never** for recall, discovery, similarity, or understanding.
+6. **`POST /api/v1/memory/sql` ⚠ exception only — aggregates only.** A flat
+   SELECT has no embeddings/graph/ranking. Use it solely for a specific
+   structured/aggregate question (counts, GROUP BY, activity-log joins) the
+   above cannot express. **Never** for recall, discovery, similarity, or
+   understanding. **Never** for "what's around this entity" — that's
+   `/memory/tree`.
 
 If you're about to use `/memory/sql` to *find* or *understand* something,
-stop — that's a `/memory/context` (or delegated `/agent/query`) job.
+stop — that's a `/memory/context` or `/memory/tree` (or delegated
+`/agent/query`) job.
 
 ### Previews vs full body
 

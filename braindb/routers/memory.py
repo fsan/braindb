@@ -79,68 +79,36 @@ def get_rules():
 
 
 @router.get("/tree/{entity_id}")
-def entity_tree(entity_id: UUID, max_depth: int = Query(default=2, ge=1, le=3)):
-    """Return an entity and its graph connections organized by depth."""
+def entity_tree(
+    entity_id: UUID,
+    max_depth: int = Query(default=2, ge=1, le=3),
+    include_keywords: bool = Query(default=False),
+    top_k: int = Query(default=40, ge=1, le=500),
+    min_path_score: float = Query(default=0.0, ge=0.0, le=1.0),
+):
+    """Return an entity and its graph neighbourhood as a nested JSON tree.
+
+    Round-2f shape: root keyed by ``entity_type``; ``children`` array of
+    typed nodes (each keyed by its own ``entity_type`` and labelled to
+    its type — wiki=title, fact/thought=content, source=filename, etc.);
+    multi-path first-wins by accumulated path score; ``tagged_with``
+    keyword edges skipped by default (root's ``keywords`` array is the
+    one-liner instead). Top-``top_k`` connections are kept; the rest are
+    summarised with a single ``_truncated`` marker.
+    """
+    from braindb.services.tree import build_entity_tree
     with get_conn() as conn:
-        # Fetch root entity
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute("SELECT * FROM entities WHERE id = %s", (str(entity_id),))
-            root_row = cur.fetchone()
-        if not root_row:
-            raise HTTPException(404, "Entity not found")
-        root_row = dict(root_row)
-
-        # Fetch root extension fields
-        root_ext = fetch_ext(conn, [root_row])
-        root_data = {
-            "id": root_row["id"], "entity_type": root_row["entity_type"],
-            "title": root_row.get("title"), "content": root_row["content"],
-            "keywords": root_row.get("keywords") or [],
-            "importance": root_row["importance"],
-            "notes": root_row.get("notes"),
-            "ext": root_ext.get(root_row["id"], {}),
-        }
-
-        # Find all connections via relations (both directions)
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute("""
-                SELECT e.*, r.relation_type, r.relevance_score, r.description AS rel_description,
-                       CASE WHEN r.from_entity_id = %s THEN 'outgoing' ELSE 'incoming' END AS direction
-                FROM relations r
-                JOIN entities e ON e.id = CASE
-                    WHEN r.from_entity_id = %s THEN r.to_entity_id
-                    ELSE r.from_entity_id
-                END
-                WHERE r.from_entity_id = %s OR r.to_entity_id = %s
-            """, (str(entity_id), str(entity_id), str(entity_id), str(entity_id)))
-            direct_rows = [dict(r) for r in cur.fetchall()]
-
-        conn_ext = fetch_ext(conn, direct_rows) if direct_rows else {}
-
-        connections = []
-        seen_ids = {entity_id}
-        for row in direct_rows:
-            eid = row["id"]
-            if eid in seen_ids:
-                continue
-            seen_ids.add(eid)
-            connections.append({
-                "entity": {
-                    "id": eid, "entity_type": row["entity_type"],
-                    "title": row.get("title"), "content": row["content"],
-                    "keywords": row.get("keywords") or [],
-                    "importance": row["importance"],
-                    "ext": conn_ext.get(eid, {}),
-                },
-                "depth": 1,
-                "relevance": row.get("relevance_score", 1.0),
-                "via_relation_type": row.get("relation_type"),
-                "via_description": row.get("rel_description"),
-                "direction": row.get("direction"),
-            })
-
-        connections.sort(key=lambda c: (-c["relevance"], c["depth"]))
-        return {"root": root_data, "connections": connections}
+        tree = build_entity_tree(
+            conn,
+            str(entity_id),
+            max_depth=max_depth,
+            include_keywords=include_keywords,
+            top_k=top_k,
+            min_path_score=min_path_score,
+        )
+    if tree is None:
+        raise HTTPException(404, "Entity not found")
+    return tree
 
 
 @router.get("/log")

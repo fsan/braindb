@@ -16,7 +16,11 @@ WITH RECURSIVE traversal AS (
         NULL::UUID          AS via_relation_id,
         NULL::TEXT          AS via_relation_type,
         NULL::TEXT          AS via_description,
-        NULL::TEXT          AS via_notes
+        NULL::TEXT          AS via_notes,
+        -- The seed each row descended from. For seeds, it's themselves;
+        -- for graph-discovered rows, it propagates through the recursion
+        -- so context.py can inherit the seed's similarity score.
+        e.id                AS seed_origin_id
     FROM entities e
     WHERE e.id = ANY(%s::uuid[])
 
@@ -30,22 +34,21 @@ WITH RECURSIVE traversal AS (
         (
             t.accumulated_relevance
             * r.relevance_score
+            * COALESCE(r.importance_score, 0.5)
             * CASE t.depth + 1
                 WHEN 1 THEN 1.0
-                WHEN 2 THEN 0.6
-                ELSE        0.3
+                WHEN 2 THEN 0.8
+                ELSE        0.6
               END
         )::FLOAT,
         t.visited || target.id,
         r.id,
         r.relation_type,
         r.description,
-        r.notes
+        r.notes,
+        t.seed_origin_id
     FROM traversal t
-    JOIN relations r ON (
-        r.from_entity_id = t.id
-        OR (r.is_bidirectional AND r.to_entity_id = t.id)
-    )
+    JOIN relations r ON r.from_entity_id = t.id OR r.to_entity_id = t.id
     JOIN entities target ON
         target.id = CASE
             WHEN r.from_entity_id = t.id THEN r.to_entity_id
@@ -56,7 +59,8 @@ WITH RECURSIVE traversal AS (
       AND (
             t.accumulated_relevance
             * r.relevance_score
-            * CASE t.depth + 1 WHEN 1 THEN 1.0 WHEN 2 THEN 0.6 ELSE 0.3 END
+            * COALESCE(r.importance_score, 0.5)
+            * CASE t.depth + 1 WHEN 1 THEN 1.0 WHEN 2 THEN 0.8 ELSE 0.6 END
           ) > %s
 )
 SELECT DISTINCT ON (id)
@@ -65,7 +69,8 @@ SELECT DISTINCT ON (id)
     created_at, updated_at, accessed_at, access_count, metadata,
     depth           AS min_depth,
     accumulated_relevance AS relevance,
-    via_relation_id, via_relation_type, via_description, via_notes
+    via_relation_id, via_relation_type, via_description, via_notes,
+    seed_origin_id
 FROM traversal
 ORDER BY id, depth, accumulated_relevance DESC
 """

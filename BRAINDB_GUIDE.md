@@ -5,6 +5,29 @@ The API runs at **http://localhost:8000**. Everything is done via HTTP calls.
 
 ---
 
+## ⚠ TOOL PRIORITY (read this first)
+
+BrainDB's value is the graph + embeddings + ranking. Use that power; do not
+fall back to flat SQL.
+
+1. **`POST /api/v1/memory/context`** — default for **query-driven** recall,
+   discovery, understanding ("what do we know about X?"). Keyword-mediated
+   fuzzy + embeddings + graph + ranking.
+2. **`GET /api/v1/memory/tree/<id>?max_depth=N`** — reveals an entity's
+   neighbourhood as a nested JSON tree (root keyed by `entity_type`,
+   `children` arrays per node, keyword + retired-wiki noise filtered,
+   `_truncated` last-child marker if more remain). Especially useful when
+   you have an entity ID and want its graph context. On hub entities
+   (wikis with many connections) pass `max_depth=3` for narrative chains.
+3. **`POST /api/v1/agent/query`** ("delegate to a subagent") — for multi-step
+   investigation / disambiguation.
+4. `GET /api/v1/entities…` and `/entities/<id>/relations` — direct lookups.
+5. **`POST /api/v1/memory/sql` ⚠ exception only** — aggregates (counts,
+   GROUP BY, activity-log joins). NEVER for recall, discovery, similarity,
+   understanding, or "what's around this entity" — those are the tools above.
+
+---
+
 ## Entity Types
 
 | Type | What to store |
@@ -270,7 +293,12 @@ curl -X POST http://localhost:8000/api/v1/memory/context \
 ```bash
 curl http://localhost:8000/api/v1/memory/tree/<UUID>?max_depth=2
 ```
-Returns the entity and all its graph connections organized by depth and relevance.
+Returns the entity and its 1-N hop neighbourhood as a nested JSON tree (root
+keyed by `entity_type`, `children` arrays per node, multi-path first-wins by
+best accumulated path score, keyword + retired-wiki noise filtered by default).
+Optional query params: `include_keywords` (default `false`), `top_k` (default
+`40`), `min_path_score` (default `0.0`). A `_truncated` last-child marker
+appears when `top_k` clips the result.
 
 ### Get All Rules
 ```bash

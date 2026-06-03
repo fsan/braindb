@@ -26,7 +26,7 @@ CRITICAL — every assistant message MUST be a tool call; never plain prose. The
 - `delete_entity(entity_id)`
 
 **Relations:**
-- `create_relation(from_entity_id, to_entity_id, relation_type, relevance_score, description)`
+- `create_relation(from_entity_id, to_entity_id, relation_type, relevance_score, importance_score, description)`
 - `view_entity_relations(entity_id)`
 - `delete_relation(relation_id)`
 
@@ -50,24 +50,30 @@ CRITICAL — every assistant message MUST be a tool call; never plain prose. The
 BrainDB's value is the graph + embeddings + ranking. Use that power; do not
 fall back to flat SQL.
 
-1. **`recall_memory`** — the default for ALL recall, discovery, and
-   understanding: multi-query fuzzy + full-text + **keyword-embedding** +
-   graph traversal + decay + ranking. This is almost always the right first
-   call.
-2. **`delegate_to_subagent`** — for any multi-step investigation or
+1. **`recall_memory`** — default for ALL **query-driven** recall, discovery,
+   and understanding: multi-query fuzzy + full-text + **keyword-embedding** +
+   graph traversal + decay + ranking. Use first when you don't yet know which
+   specific entity you want — "what do we know about X."
+2. **`view_tree(<id>, max_depth=N)`** — the efficient "explore around this
+   entity" tool. Returns a nested JSON tree: root keyed by entity_type,
+   `children` arrays per node, 1-N hops out, keyword/retired-wiki noise
+   filtered, `_truncated` marker if more remain. When you have an entity
+   ID and want what's connected, this is usually a better next step than
+   another `recall_memory`. On hub entities (wikis), pass `max_depth=3`
+   to see narrative chains.
+3. **`delegate_to_subagent`** — for any multi-step investigation or
    disambiguation ("is this the same person/thing?", "find and resolve X").
    A fresh agent with the full toolset; returns a summary. Prefer this over
    doing a long crawl yourself.
-3. `view_tree` / `view_entity_relations` / `get_entity` / `list_entities` —
-   targeted structure lookups.
-4. **`search_sql` — exception only.** A blunt SELECT has no embeddings, no
-   graph, no ranking — it throws away everything BrainDB is good at. Use it
-   *only* for a specific structured/aggregate question the tools above cannot
-   express (counts, GROUP BY, activity-log joins). Never for recall,
-   discovery, similarity, or understanding.
+4. `view_entity_relations` / `get_entity` / `list_entities` — direct lookups
+   (single-hop relations, full body of one entity, listing by filter).
+5. **`search_sql` ⚠ exception only — aggregates only** (counts, GROUP BY,
+   activity-log joins, schema inspection). A blunt SELECT has no embeddings,
+   no graph, no ranking — it throws away everything BrainDB is good at.
+   Never for recall, discovery, similarity, or understanding.
 
 If you reach for `search_sql` to "find" or "understand" something, stop —
-that's a `recall_memory` or `delegate_to_subagent` job.
+that's a `recall_memory` or `view_tree` or `delegate_to_subagent` job.
 
 ## READING CONTENT — previews vs the full body
 

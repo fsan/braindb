@@ -397,7 +397,14 @@ def assemble_context(conn, req: ContextRequest) -> ContextResponse:
     items = []
     for row in all_rows:
         eid = row["id"]
-        score = seed_scores.get(eid, 0.3)
+        # Score = the entity's own similarity if it was a seed; otherwise inherit
+        # the score of the seed it descended from (carried by `seed_origin_id`
+        # through the graph CTE). This propagates the real similarity signal
+        # through depth-1+ hops instead of resetting to a literal fallback.
+        score = seed_scores.get(eid)
+        if score is None:
+            origin = row.get("seed_origin_id")
+            score = seed_scores.get(str(origin), 1.0) if origin else 1.0
         depth = row.get("min_depth", 0)
         relevance = row.get("relevance", 1.0)
         items.append(_to_item(row, score, depth, relevance, ext_map.get(eid, {})))

@@ -112,10 +112,10 @@ async def recall_memory(
     queries: list[str],
     max_results: int = settings.recall_default_max_results,
 ) -> str:
-    """Search BrainDB memory with multiple natural language queries.
+    """⭐ Primary recall tool — use FIRST for ANY "what do we know about X" question.
+
     Runs fuzzy + fulltext + keyword embedding search, merges with geometric mean,
     traverses the graph up to 3 hops, applies temporal decay.
-    Use this as the primary recall tool.
 
     QUERY STRATEGY — IMPORTANT for high-recall on narrow subjects:
 
@@ -542,7 +542,8 @@ async def create_relation(
     from_entity_id: str,
     to_entity_id: str,
     relation_type: str,
-    relevance_score: float = 0.7,
+    relevance_score: float = 0.5,
+    importance_score: float = 0.5,
     description: Optional[str] = None,
 ) -> str:
     """Create a relation between two entities.
@@ -551,7 +552,8 @@ async def create_relation(
         from_entity_id: Source entity UUID.
         to_entity_id: Target entity UUID.
         relation_type: One of: supports, contradicts, elaborates, refers_to, derived_from, similar_to, is_example_of, challenges, tagged_with.
-        relevance_score: 0-1 (default 0.7).
+        relevance_score: 0-1 — how tight the semantic link is (0.9 = strong, 0.5 = neutral / "didn't judge", 0.2 = weak).
+        importance_score: 0-1 — how much losing this edge would degrade recall (0.9 = critical, 0.5 = neutral / "didn't judge", 0.2 = trivial).
         description: Why this relation exists.
     """
     try:
@@ -559,9 +561,9 @@ async def create_relation(
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 try:
                     cur.execute(
-                        """INSERT INTO relations (from_entity_id, to_entity_id, relation_type, relevance_score, description)
-                           VALUES (%s, %s, %s, %s, %s) RETURNING id""",
-                        (from_entity_id, to_entity_id, relation_type, relevance_score, description),
+                        """INSERT INTO relations (from_entity_id, to_entity_id, relation_type, relevance_score, importance_score, description)
+                           VALUES (%s, %s, %s, %s, %s, %s) RETURNING id""",
+                        (from_entity_id, to_entity_id, relation_type, relevance_score, importance_score, description),
                     )
                     rid = cur.fetchone()["id"]
                 except psycopg2.errors.UniqueViolation:
@@ -634,33 +636,27 @@ async def delete_relation(relation_id: str) -> str:
 @function_tool
 @_verbose("view_tree")
 async def view_tree(entity_id: str, max_depth: int = 2) -> str:
-    """View the graph of connections around an entity (incoming + outgoing).
+    """⭐ Reveals an entity's neighbourhood as a nested JSON tree:
+    root keyed by ``entity_type``, ``children`` arrays per node, multi-path
+    first-wins, keyword/retired-wiki noise filtered, ``_truncated`` marker
+    when more remain. Especially useful when you have an entity ID (from a
+    previous result) and want its graph context — often a sharper choice
+    than another `recall_memory` about the same entity. Pass `max_depth=3`
+    on hub entities (wikis with many connections) to see narrative chains.
 
     Args:
         entity_id: UUID of the root entity.
         max_depth: How far to traverse (1-3, default 2).
     """
+    if max_depth < 1 or max_depth > 3:
+        return _err("max_depth must be 1-3")
     try:
+        from braindb.services.tree import build_entity_tree
         with get_conn() as conn:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute(
-                    """SELECT e.*, r.relation_type, r.relevance_score, r.description AS rel_desc,
-                              CASE WHEN r.from_entity_id = %s THEN 'out' ELSE 'in' END AS dir
-                       FROM relations r
-                       JOIN entities e ON e.id = CASE WHEN r.from_entity_id = %s THEN r.to_entity_id ELSE r.from_entity_id END
-                       WHERE r.from_entity_id = %s OR r.to_entity_id = %s""",
-                    (entity_id, entity_id, entity_id, entity_id),
-                )
-                rows = [dict(r) for r in cur.fetchall()]
-        if not rows:
-            return "No connections."
-        lines = [f"{len(rows)} connections from {entity_id}:"]
-        for r in rows:
-            lines.append(
-                f"  [{r['dir']}] {r['relation_type']} (rel={r['relevance_score']})\n"
-                f"    [{r['entity_type']}] {r['content'][:80]} (id: {r['id']})"
-            )
-        return _truncate("\n".join(lines))
+            tree = build_entity_tree(conn, entity_id, max_depth=max_depth)
+        if tree is None:
+            return _err(f"Entity not found: {entity_id}")
+        return _truncate(json.dumps(tree, indent=2, default=str, ensure_ascii=False))
     except Exception as e:
         return _err(str(e))
 
@@ -668,7 +664,10 @@ async def view_tree(entity_id: str, max_depth: int = 2) -> str:
 @function_tool
 @_verbose("search_sql")
 async def search_sql(query: str) -> str:
-    """Run a read-only SQL query (SELECT/WITH only). Use for complex exploration.
+    """⚠ Aggregates ONLY (counts, GROUP BY, joins for stats). NEVER for recall /
+    discovery / understanding — that's recall_memory. NEVER for "what's around
+    this entity" — that's view_tree. If you're using SQL to find or understand
+    something, stop and pick the right tool.
 
     Args:
         query: SQL query — must start with SELECT or WITH.
