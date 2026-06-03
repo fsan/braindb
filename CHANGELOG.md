@@ -5,6 +5,79 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] — 2026-06-03
+
+Headline: a focused pass on recall quality and the `view_tree` tool. The
+per-edge LLM judgment that was missing on `create_relation` is now wired
+through to graph scoring, and `view_tree` returns a nested JSON tree the
+agent can actually navigate (vs the depth-grouped text that silently
+clipped 70% of connections on popular wikis).
+
+### Changed
+
+- **`view_tree` / `GET /api/v1/memory/tree/<id>` — nested JSON shape.**
+  Root keyed by `entity_type`, `children` arrays per node, multi-path
+  first-wins by best accumulated path score, keyword + retired-wiki noise
+  filtered by default, `_truncated` last-child marker when more remain.
+  One shared builder (`build_entity_tree` in `braindb/services/tree.py`)
+  for the HTTP endpoint and the agent tool — no behaviour drift. New
+  optional query params: `include_keywords` (default `false`), `top_k`
+  (default `40`), `min_path_score` (default `0.0`). Bench: Path B (Qwen
+  27B) 5/5 PASS, **−25% wall-clock**, **−26% tool calls**, **zero
+  `delegate` calls** on the hardest question (was 2). Path A (Claude
+  Code + curl skill) 5/5 PASS, `view_tree` usage 0 → 1-2 calls — the
+  structured shape is now usable in practice. Numbers in
+  `benchmarks/runs/round-2f_comparison.md`.
+- **`create_relation` writes both edge scores.** The `importance_score`
+  column had been NULL for every agent-created row since day one; the
+  parameter is now on the tool, the watcher's extraction prompt no
+  longer dictates literal score values (the LLM judges per docstring),
+  and the graph CTE multiplies `relevance_score × COALESCE(
+  importance_score, 0.5) × depth_penalty` per hop. The
+  `is_bidirectional` field on `relations` is now ignored by graph
+  traversal — every edge walks both ways (matching what
+  `services/tree.py` already did). The field stays in the schema for
+  backwards compatibility.
+- **Seed-similarity propagation in graph scoring.** Recall hops carry
+  the seed's similarity score forward through the graph; the depth
+  multiplier is softened so default-quality intermediates don't collapse
+  depth-2/3 results.
+- **Prompts**: `view_tree` reframed as a capability for "explore around
+  this entity"; `search_sql` demoted to an aggregates-only exception.
+  Same wording applied to `system_prompt.md`, both skill files
+  (`skills/braindb/SKILL.md`, `skills/braindb-agent/SKILL.md`),
+  `README.md`, and `BRAINDB_GUIDE.md`.
+
+### Fixed
+
+- **`view_tree` keyword noise**: keyword entities were leaking through
+  non-`tagged_with` edges (e.g. `similar_to` between keywords). The
+  filter now applies to target `entity_type='keyword'` as well as the
+  edge type. Surfaced by the new nested JSON shape and fixed in the
+  same commit.
+- **`view_tree` duplicate retired-wiki siblings**: when the wiki
+  maintainer creates a wiki and later consolidates duplicates, the
+  retired ones used to still appear in `view_tree` output as duplicate
+  siblings of the canonical wiki. The tree CTE now LEFT JOINs
+  `wikis_ext` and skips rows where `retired_at IS NOT NULL`.
+- **Test isolation in `tests/test_ingest.py`**: the three ingest tests
+  used fixed content strings, so a previous run's row in the DB caused
+  dedup-by-hash to fire and the 201 assertion to fail on subsequent
+  runs. Each test now prepends a per-run `uuid.uuid4().hex` to its
+  content.
+- **Missing test dep**: added `pytest-asyncio==0.23.7` to
+  `[project.optional-dependencies].dev`. Existing
+  `@pytest.mark.asyncio` tests were silently failing on clean installs.
+
+### Upgrading from v0.3.0
+
+No DB migration. No env-var changes. The wiki maintainer's existing
+retired-wiki pipeline now also gates `view_tree` traversal — old wikis
+with `retired_at IS NOT NULL` are silently skipped in tree output (they
+remain readable via `GET /api/v1/entities/<id>`). `pyproject.toml`
+version field was at `0.2.0` in v0.3.0's tagged release (the bump was
+missed); this release catches it up to `0.4.0` in one step.
+
 ## [0.3.0] — 2026-05-25
 
 Headline: a small read-only frontend lands so humans can browse the same

@@ -134,7 +134,7 @@ Drop a markdown file into `data/sources/` and the watcher sidecar picks it up wi
 | POST | `/api/v1/entities/datasources/ingest` | Read a file from disk and create a datasource entity |
 | POST | `/api/v1/memory/search` | Fast fuzzy search |
 | POST | `/api/v1/memory/context` | Full retrieval: fuzzy → graph → decay → rank |
-| GET | `/api/v1/memory/tree/{id}` | Entity graph tree — connections by depth |
+| GET | `/api/v1/memory/tree/{id}` | Entity neighbourhood as a nested JSON tree |
 | GET | `/api/v1/memory/log` | Activity log — when and how things happened |
 | POST | `/api/v1/memory/sql` | Read-only SQL queries (SELECT/WITH only) |
 | POST | `/api/v1/memory/generate-embeddings` | Batch-generate keyword embeddings |

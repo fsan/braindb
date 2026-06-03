@@ -98,10 +98,14 @@ to flat SQL.
    per-keyword halving) keeps results balanced. Then graph traversal + decay
    + ranking.
 2. **`GET /api/v1/memory/tree/<id>?max_depth=N`** — reveals an entity's
-   connections in one call: relations + 1-N hop neighbours + edge scores.
-   Especially useful when you have an entity ID (from a previous recall)
-   and want its graph context — often a sharper choice than another
-   `/memory/context` call about the same entity.
+   neighbourhood as a nested JSON tree: root keyed by `entity_type`,
+   `children` arrays per node, 1-N hops out, keyword + retired-wiki
+   noise filtered by default, `_truncated` marker as a last child if
+   more remain. Especially useful when you have an entity ID (from a
+   previous recall) and want its graph context — often a sharper choice
+   than another `/memory/context` call about the same entity. On hub
+   entities (wikis with many connections) pass `max_depth=3` to see
+   narrative chains.
 3. **`POST /api/v1/agent/query` with "delegate to a subagent…"** — for
    multi-step investigation/disambiguation; the agent researches and returns
    a summary.

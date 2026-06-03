@@ -14,8 +14,11 @@ fall back to flat SQL.
    discovery, understanding ("what do we know about X?"). Keyword-mediated
    fuzzy + embeddings + graph + ranking.
 2. **`GET /api/v1/memory/tree/<id>?max_depth=N`** — reveals an entity's
-   connections in one call (relations + 1-N hop neighbours + edge scores).
-   Especially useful when you have an entity ID and want its graph context.
+   neighbourhood as a nested JSON tree (root keyed by `entity_type`,
+   `children` arrays per node, keyword + retired-wiki noise filtered,
+   `_truncated` last-child marker if more remain). Especially useful when
+   you have an entity ID and want its graph context. On hub entities
+   (wikis with many connections) pass `max_depth=3` for narrative chains.
 3. **`POST /api/v1/agent/query`** ("delegate to a subagent") — for multi-step
    investigation / disambiguation.
 4. `GET /api/v1/entities…` and `/entities/<id>/relations` — direct lookups.
@@ -290,7 +293,12 @@ curl -X POST http://localhost:8000/api/v1/memory/context \
 ```bash
 curl http://localhost:8000/api/v1/memory/tree/<UUID>?max_depth=2
 ```
-Returns the entity and all its graph connections organized by depth and relevance.
+Returns the entity and its 1-N hop neighbourhood as a nested JSON tree (root
+keyed by `entity_type`, `children` arrays per node, multi-path first-wins by
+best accumulated path score, keyword + retired-wiki noise filtered by default).
+Optional query params: `include_keywords` (default `false`), `top_k` (default
+`40`), `min_path_score` (default `0.0`). A `_truncated` last-child marker
+appears when `top_k` clips the result.
 
 ### Get All Rules
 ```bash
