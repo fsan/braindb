@@ -39,7 +39,9 @@ The bench runs in `docker-compose.bench.yml` — a completely separate stack
 from your personal `docker-compose.yml`. Layered isolation:
 
 - Separate Docker project namespace: `name: braindb_bench`
-- **Separate Postgres container** (`braindb_bench_postgres`) on host port 5433
+- **Separate Postgres container** (`braindb_bench_postgres`) on host port 5434
+  (host port 5433 is already used by the personal `postgres_container` in
+  this environment; bench takes 5434 to avoid a collision)
 - Separate Postgres database: `braindb_bench` (never `braindb`)
 - Separate Postgres data volume: `braindb_bench_pgdata`
 - **Separate BrainDB API on port 8001** (personal stays on 8000)

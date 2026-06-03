@@ -13,7 +13,9 @@
 #
 # Safety properties (also enforced by code in benchmarks/beam/bench.py):
 #   - Postgres database is named `braindb_bench` (never `braindb`)
-#   - Postgres runs in its OWN container on host port 5433 (not 5432)
+#   - Postgres runs in its OWN container on host port 5434 (the user's
+#     personal Postgres is already on 5433, so bench takes 5434 to avoid
+#     a host-port collision)
 #   - The bench BrainDB API is on host port 8001 (not 8000)
 #   - The bench watcher mounts ./data_bench/ as /app/data, so it never
 #     sees files in ./data/ (the personal watcher's directory)
@@ -36,7 +38,9 @@ services:
       # literal "braindb_bench" substring in DATABASE_URL.
       POSTGRES_PASSWORD: bench_local_only
     ports:
-      - "5433:5432"
+      # Personal Postgres is already on 5433 in this environment; bench
+      # takes 5434 to avoid a host-port collision. Verified before commit.
+      - "5434:5432"
     volumes:
       - braindb_bench_pgdata:/var/lib/postgresql/data
     networks:
