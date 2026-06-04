@@ -1,0 +1,13 @@
+# Bench-only Python deps (host environment, NOT the BrainDB container).
+# Install with: pip install -r benchmarks/beam/requirements.txt
+
+# HuggingFace dataset loader (BEAM dataset hosted at Mohammadta/BEAM)
+datasets>=3.0,<4.0
+huggingface_hub>=0.25
+
+# HTTP client for talking to the bench BrainDB API (:8001) and the
+# Qwen OpenAI-compatible endpoint
+requests>=2.32
+
+# Psycopg2 binary for the bench-DB safety check + reset SQL
+psycopg2-binary>=2.9
