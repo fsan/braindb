@@ -358,7 +358,7 @@ def run_one_conversation(
     run_dir: Path,
     *,
     warmup_timeout: float = 1800,
-    warmup_settle_seconds: float = 180,
+    warmup_settle_seconds: float = 300,
     question_timeout: float = QUESTION_TIMEOUT_SECONDS,
     block_on_wiki_queue: bool = False,
 ) -> dict:
@@ -517,10 +517,11 @@ def _parse_args() -> argparse.Namespace:
                    help="abort the whole run if any single conversation raises")
     p.add_argument("--warmup-timeout", type=float, default=1800,
                    help="seconds before warmup gives up on convergence")
-    p.add_argument("--warmup-settle-seconds", type=float, default=180,
-                   help="seconds of quiet on entities before declaring warmup clear "
-                        "(default 180; big enough to span the gap between datasource "
-                        "creation and the first extracted fact for slow chunk processing)")
+    p.add_argument("--warmup-settle-seconds", type=float, default=300,
+                   help="seconds of quiet on entities AND relations before declaring "
+                        "warmup clear (default 300). Per-chunk agents have ~60-90s quiet "
+                        "stretches doing subagent / recall_memory work between save_fact "
+                        "and create_relation bursts; 300s comfortably covers those.")
     p.add_argument("--wait-for-wikis", action="store_true",
                    help="Strict warmup mode: also wait for the wiki_job queue to be "
                         "fully drained before answering. Off by default because the "
