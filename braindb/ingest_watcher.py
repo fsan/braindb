@@ -42,7 +42,11 @@ FAILED_DIR = WATCH_DIR / "failed"
 ALLOWED_EXTS = {".md", ".txt", ".json", ".yaml", ".yml", ".csv", ".log", ".html", ".xml"}
 SKIP_NAMES = {"README.md", ".gitkeep"}
 
-CHUNK_WORDS = 600           # target chunk size (~4-5k token context per extraction call — NIM-friendly)
+CHUNK_WORDS = 1200          # target chunk size (~7-8k char prompt, ~1.5K tokens of chunk text per call).
+                            # Bumped 600 -> 1200 once /agent/query's max_length cap was lifted to 40000;
+                            # halves the chunk count on big documents (so halves total round-trips).
+                            # The per-chunk agent now also creates cross-fact relations within the chunk
+                            # (see extract_facts_from_chunk), so there is no separate central_review pass.
 CHUNK_OVERLAP = 75          # words of overlap between adjacent chunks — catches facts that span a boundary
 
 INGEST_TIMEOUT = 60
@@ -155,7 +159,7 @@ def extract_facts_from_chunk(ds_id: str, title: str, idx: int, total: int, chunk
         f"Below is chunk {idx}/{total} of the document between <content> markers.\n"
         f"Extract the concrete, standalone FACTS from this chunk — specific claims,\n"
         f"numbers, events, named decisions. Ignore filler, opinion, and generic\n"
-        f"statements. Aim for quality over quantity: typically 3-8 facts per chunk.\n\n"
+        f"statements. Aim for quality over quantity: typically 5-10 facts per chunk.\n\n"
         f"For EACH fact:\n"
         f'  a) Call save_fact(content="<the fact in one sentence>",\n'
         f'     source="document", keywords=[2-4 precise tags],\n'
@@ -166,14 +170,23 @@ def extract_facts_from_chunk(ds_id: str, title: str, idx: int, total: int, chunk
         f'to_entity_id="{ds_id}", relation_type="derived_from",\n'
         f'     description="Fact extracted from {title}"). Judge\n'
         f"     relevance_score and importance_score per the tool's docstring.\n\n"
+        f"AFTER all facts in this chunk are saved, look back at the facts you just\n"
+        f"created and add cross-fact relations WITHIN this chunk where genuinely\n"
+        f"meaningful (not forced):\n"
+        f"  c) For pairs that semantically connect, call create_relation(from_entity_id=<id_A>,\n"
+        f'     to_entity_id=<id_B>, relation_type=<one of: supports, contradicts,\n'
+        f"     elaborates, similar_to, is_example_of>, description=\"<short why>\").\n"
+        f"     Skip if no pair clearly relates. Quality over quantity — typically 0-5\n"
+        f"     such relations per chunk.\n\n"
         f"Do NOT call get_entity. Do NOT call update_entity on the datasource.\n"
-        f"Do NOT touch the datasource content — it is read-only.\n\n"
-        f"When all facts in this chunk are processed, call final_answer with\n"
+        f"Do NOT touch the datasource content — it is read-only.\n"
+        f"Do NOT create relations to facts from OTHER chunks — you only see this one.\n\n"
+        f"When all facts AND cross-fact relations are saved, call final_answer with\n"
         f"exactly this format so the watcher can parse it:\n"
         f'  "Saved N facts from chunk {idx}/{total}: <fact_id_1>, <fact_id_2>, ..."\n\n'
         f"<content>\n{chunk_text}\n</content>"
     )
-    answer = call_agent(prompt, max_turns=40)
+    answer = call_agent(prompt, max_turns=35)
     if not answer:
         return []
     fact_ids = UUID_RE.findall(answer)
@@ -256,7 +269,12 @@ def enrich_datasource(ds: dict, file_path: Path) -> None:
             log.warning("chunk %d/%d produced no facts", i, len(chunks))
 
     log.info("extraction complete for %s: %d facts total", ds_id[:8], len(all_fact_ids))
-    central_review(ds_id, title, all_fact_ids)
+    # central_review(ds_id, title, all_fact_ids)
+    # ^ kept dormant; per-chunk handles cross-fact relations now (see
+    # extract_facts_from_chunk step c). Re-enable this line to restore the
+    # whole-document cross-fact synthesis pass — note it fails on big docs
+    # because the fact list builds a >10K-char prompt (see central_review
+    # docstring for the prompt-construction issue).
 
 
 def process_file(path: Path) -> None:

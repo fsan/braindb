@@ -20,7 +20,14 @@ router = APIRouter(prefix="/api/v1/agent", tags=["agent"])
 
 
 class AgentQueryRequest(BaseModel):
-    query: str = Field(..., min_length=1, max_length=10000)
+    # Bumped 10000 -> 40000 to accommodate the ingest watcher's per-chunk
+    # extraction prompts at the larger CHUNK_WORDS=1200 size (chunk text
+    # ~6 KB + boilerplate + cross-fact-relation instructions ~7.5 KB total,
+    # well under the new cap). Sized so that even at 40K input chars
+    # (~10K tokens) the LLM has plenty of headroom: Qwen 27B runs at
+    # max_model_len=40960, so input + system prompt + tool defs +
+    # ~35-turn tool-call iteration leaves ~30% of the window for output.
+    query: str = Field(..., min_length=1, max_length=40000)
     max_turns: int | None = Field(default=None, ge=1, le=60)
 
 
