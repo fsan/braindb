@@ -77,15 +77,31 @@ def wait_for_warmup(
     timeout_seconds: float = 1800.0,
     log_interval: float = 10.0,
     verbose: bool = True,
+    block_on_wiki_queue: bool = False,
+    database_url: str | None = None,
 ) -> dict:
-    """Block until ingest + wiki pipeline have drained for this conversation.
+    """Block until ingest is done (and optionally wiki pipeline drained).
+
+    By default (``block_on_wiki_queue=False``) the barrier waits only for
+    extraction to settle (no new entity INSERTs for ``settle_seconds`` AND
+    no files remaining in ``data_bench/sources/``). Wiki processing runs
+    asynchronously in the background while Phase C asks questions; that is
+    correct behaviour because recall queries on existing entities don't
+    need the wiki queue to be empty.
+
+    Set ``block_on_wiki_queue=True`` (CLI ``--wait-for-wikis``) for the old
+    strict behaviour that also waits for ``wiki_job`` to be fully drained.
+    That convention was a bench-side mistake that turned the wiki layer
+    into a single-point-of-failure for large documents where the maintainer
+    queues candidates faster than the writer drains them.
 
     Returns a small stats dict (wall_clock_s, entities, relations, wikis).
     Raises TimeoutError if convergence does not happen within timeout.
     """
-    assert_bench_database_url()
+    url = database_url or BENCH_DATABASE_URL
+    assert_bench_database_url(url)
 
-    conn = psycopg2.connect(BENCH_DATABASE_URL)
+    conn = psycopg2.connect(url)
     conn.autocommit = True
 
     start = time.monotonic()
@@ -109,7 +125,7 @@ def wait_for_warmup(
                 clear = (
                     files_remaining == 0
                     and entity_age >= settle_seconds
-                    and pending == 0
+                    and (not block_on_wiki_queue or pending == 0)
                 )
 
             elapsed = time.monotonic() - start
@@ -167,6 +183,11 @@ def _cli() -> int:
     p.add_argument("--poll-interval", type=float, default=5)
     p.add_argument("--consecutive-clear", type=int, default=2)
     p.add_argument("--quiet", action="store_true")
+    p.add_argument("--wait-for-wikis", action="store_true",
+                   help="Strict mode: also require wiki_job queue empty before "
+                        "declaring warmup done. Off by default because the wiki "
+                        "writer can be slower than the maintainer queues, so the "
+                        "queue may never converge for large documents.")
     args = p.parse_args()
 
     stats = wait_for_warmup(
@@ -175,6 +196,7 @@ def _cli() -> int:
         poll_interval=args.poll_interval,
         timeout_seconds=args.timeout,
         verbose=not args.quiet,
+        block_on_wiki_queue=args.wait_for_wikis,
     )
     print(f"\nwarmup complete: {stats}")
     return 0

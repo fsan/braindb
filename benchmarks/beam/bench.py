@@ -2,20 +2,30 @@
 
 Per-conversation lifecycle (zero interleaving within a conversation):
 
-    Phase A — reset bench DB + write conversation .md to data_bench/sources/beam/
-    Phase B — warmup wait (extraction + wiki pipeline drains)
-    Phase C — answer all of this conversation's probing questions via /agent/query
-    Phase D — record answers, probing_questions, warmup_stats, meta to runs/<run_id>/conv_<NNN>/
+    Phase A — create new Postgres database `braindb_conv_NNN`, restart
+              api_bench with DATABASE_URL pointing at it, wait for healthy,
+              write conversation .md to data_bench/sources/
+    Phase B — warmup wait (extraction settles; wikis run async in background)
+    Phase C — answer this conversation's 20 probing questions via /agent/query
+    Phase D — record answers + probing_questions + warmup_stats + meta to
+              runs/<run_id>/conv_<NNN>/
 
-Strict safety: every destructive op (DB reset, file write to data_bench/)
-is gated on the literal substring ``braindb_bench`` appearing in the active
-``DATABASE_URL`` — never touches the personal braindb database.
+After all conversations: 20 (or 35) databases sit in postgres_bench, each
+fully self-contained and inspectable (`docker exec braindb_bench_postgres
+psql -U braindb_bench -d braindb_conv_007 -c '\\dt'`).
+
+Strict safety: every destructive op (CREATE DATABASE, DROP DATABASE, etc.)
+is gated on the literal substring `braindb_bench` OR `braindb_conv_`
+appearing in the URL. The personal `braindb` database is never touched.
 
 CLI:
 
-    python -m benchmarks.beam.bench --split 1M --limit 3      # smoke (3 convs)
-    python -m benchmarks.beam.bench --split 1M                 # full (35 convs)
+    python -m benchmarks.beam.bench --split 100K --limit 1       # smoke (1 conv)
+    python -m benchmarks.beam.bench --split 100K                  # full 100K (20 convs)
     python -m benchmarks.beam.bench --split 1M --limit 3 --fail-fast
+
+Intended to run from inside the `bench_runner` container (which has the
+docker CLI installed + docker socket mounted so it can recreate api_bench).
 """
 from __future__ import annotations
 
@@ -47,22 +57,22 @@ from benchmarks.beam.config import (
 )
 from benchmarks.beam.warmup import wait_for_warmup
 
-# Tables that get truncated per conversation. alembic_version is NOT in this
-# list — we want migrations to stay applied. Everything else is wiped.
-_TRUNCATE_SQL = """
-TRUNCATE TABLE
-    entities,
-    relations,
-    wikis_ext,
-    wiki_job,
-    facts_ext,
-    thoughts_ext,
-    sources_ext,
-    datasources_ext,
-    rules_ext,
-    activity_log
-RESTART IDENTITY CASCADE;
-"""
+# Admin URL + DB-URL base for per-conversation database creation. The
+# bench_runner service in docker-compose.bench.yml supplies these via env;
+# fall back to sensible defaults that match the bench network.
+_ADMIN_DB_URL = os.getenv(
+    "BENCH_ADMIN_DATABASE_URL",
+    "postgresql://braindb_bench:bench_local_only@postgres_bench:5432/postgres",
+)
+_DB_BASE_URL = os.getenv(
+    "BENCH_DB_BASE_URL",
+    "postgresql://braindb_bench:bench_local_only@postgres_bench:5432",
+)
+
+# docker-compose file path inside the bench_runner container. The compose
+# file is mounted via the repo bind mount; `COMPOSE_FILE` env var hints
+# the same path so `docker compose ...` picks it up automatically.
+_COMPOSE_FILE = os.getenv("COMPOSE_FILE", "/app/docker-compose.bench.yml")
 
 # Per-question agent timeout. BrainDB's /agent/query can take a while on
 # local Qwen — multi-turn agent loops + extraction can be 30s to several
@@ -120,20 +130,98 @@ def check_bench_api_healthy(base: str = BENCH_API_BASE, timeout: float = 5) -> N
         raise RuntimeError(f"bench API unhealthy: {body}")
 
 
-# ----------------------------- DB reset --------------------------------------
+# ----------------------------- per-conv DB orchestration ---------------------
 
-def reset_bench_db() -> None:
-    """TRUNCATE all data tables in the bench DB. Schema (alembic_version)
-    is preserved so the API stays connected and migrations stay applied.
+def _conv_db_name(conv_id: int) -> str:
+    """Return the database name for a given conversation_id (zero-padded)."""
+    return f"braindb_conv_{int(conv_id):03d}"
+
+
+def _conv_db_url(conv_id: int) -> str:
+    """Full DATABASE_URL for the conversation's database."""
+    return f"{_DB_BASE_URL}/{_conv_db_name(conv_id)}"
+
+
+def create_conv_db(conv_id: int) -> str:
+    """Create a fresh Postgres database `braindb_conv_NNN`.
+
+    If a database with the same name exists from a prior run, drop + recreate
+    it (the per-conv DB is supposed to be a clean slate). Returns the full
+    connection URL for the new database.
+
+    Safety: hits postgres_bench via the admin connection (`postgres` maintenance
+    DB) — never the user's personal `braindb`.
     """
-    assert_bench_database_url()
-    conn = psycopg2.connect(BENCH_DATABASE_URL)
-    conn.autocommit = True
+    db_name = _conv_db_name(conv_id)
+    db_url = _conv_db_url(conv_id)
+    assert_bench_database_url(db_url)
+    admin = psycopg2.connect(_ADMIN_DB_URL)
+    admin.autocommit = True
     try:
-        with conn.cursor() as cur:
-            cur.execute(_TRUNCATE_SQL)
+        with admin.cursor() as cur:
+            # Terminate any leftover backend on this DB before drop (otherwise
+            # DROP fails with "is being accessed by other users").
+            cur.execute(
+                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                "WHERE datname = %s AND pid <> pg_backend_pid()",
+                (db_name,),
+            )
+            cur.execute(f'DROP DATABASE IF EXISTS "{db_name}"')
+            cur.execute(f'CREATE DATABASE "{db_name}" OWNER braindb_bench')
     finally:
-        conn.close()
+        admin.close()
+    return db_url
+
+
+def restart_api_with_db(database_url: str) -> None:
+    """Force-recreate the api_bench container with BENCH_DATABASE_URL set
+    to the given URL. The container's startup runs alembic migrations on
+    the new (empty) DB, then starts uvicorn.
+
+    Uses `docker compose up -d --force-recreate api_bench` from inside the
+    bench_runner container (which has the docker CLI + socket mounted).
+    """
+    assert_bench_database_url(database_url)
+    env = os.environ.copy()
+    env["BENCH_DATABASE_URL"] = database_url
+    result = subprocess.run(
+        [
+            "docker", "compose",
+            "-f", _COMPOSE_FILE,
+            "up", "-d", "--force-recreate", "--no-deps", "api_bench",
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"docker compose up -d --force-recreate api_bench failed:\n"
+            f"  stdout: {result.stdout[:500]}\n  stderr: {result.stderr[:500]}"
+        )
+
+
+def wait_for_api_healthy(timeout: float = 180, poll: float = 2) -> None:
+    """Block until the bench api responds with status=ok.
+
+    The api needs to (1) connect to the new DB, (2) run alembic migrations,
+    (3) load the embedding model into memory. On first start this is ~30-60s;
+    on subsequent restarts (model already cached) it can still be ~20-30s.
+    """
+    start = time.monotonic()
+    last_err = None
+    while time.monotonic() - start < timeout:
+        try:
+            r = requests.get(f"{BENCH_API_BASE}/health", timeout=3)
+            if r.status_code == 200 and r.json().get("status") == "ok":
+                return
+            last_err = f"HTTP {r.status_code}"
+        except Exception as e:
+            last_err = str(e)
+        time.sleep(poll)
+    raise TimeoutError(
+        f"bench api did not become healthy within {timeout:.0f}s (last: {last_err})"
+    )
 
 
 def _clear_sources_dir() -> None:
@@ -200,20 +288,30 @@ def run_one_conversation(
     warmup_timeout: float = 1800,
     warmup_settle_seconds: float = 180,
     question_timeout: float = QUESTION_TIMEOUT_SECONDS,
+    block_on_wiki_queue: bool = False,
 ) -> dict:
     """Full A-B-C-D lifecycle for one conversation. Returns a small stats dict."""
     conv_dir = run_dir / f"conv_{int(conv.conversation_id):03d}"
     conv_dir.mkdir(parents=True, exist_ok=True)
 
     started = time.monotonic()
+    conv_db_name = _conv_db_name(int(conv.conversation_id))
+    conv_db_url = _conv_db_url(int(conv.conversation_id))
 
-    # ---- Phase A: reset + ingest ----
-    print(f"[A] reset bench DB + write conversation markdown ...", flush=True)
-    reset_bench_db()
+    # ---- Phase A: fresh DB + restart api + ingest ----
+    print(f"[A] create DB '{conv_db_name}' + restart api + write conversation ...",
+          flush=True)
+    create_conv_db(int(conv.conversation_id))
+    restart_api_with_db(conv_db_url)
+    wait_for_api_healthy()
     _clear_sources_dir()
     md_path = write_conversation_md(conv, DATA_BENCH_SOURCES)
     md_kb = md_path.stat().st_size / 1024
-    print(f"[A done] {md_path.name} ({md_kb:.0f} KB) dropped at {_now_iso()}", flush=True)
+    print(
+        f"[A done] api restarted on {conv_db_name}; "
+        f"{md_path.name} ({md_kb:.0f} KB) dropped at {_now_iso()}",
+        flush=True,
+    )
 
     # ---- Phase B: warmup wait ----
     print(f"[B] warmup wait ...", flush=True)
@@ -221,6 +319,8 @@ def run_one_conversation(
         settle_seconds=warmup_settle_seconds,
         timeout_seconds=warmup_timeout,
         verbose=True,
+        block_on_wiki_queue=block_on_wiki_queue,
+        database_url=conv_db_url,
     )
     print(f"[B done] {warmup_stats}", flush=True)
 
@@ -281,6 +381,7 @@ def run_one_conversation(
         "question_errors": question_errors,
         "wall_clock_s": round(time.monotonic() - started, 1),
         "started_at": _now_iso(),
+        "bench_db_name": conv_db_name,
     }
     conv_dir.joinpath("conversation_meta.json").write_text(
         json.dumps(conv_meta, indent=2), encoding="utf-8"
@@ -348,6 +449,12 @@ def _parse_args() -> argparse.Namespace:
                    help="seconds of quiet on entities before declaring warmup clear "
                         "(default 180; big enough to span the gap between datasource "
                         "creation and the first extracted fact for slow chunk processing)")
+    p.add_argument("--wait-for-wikis", action="store_true",
+                   help="Strict warmup mode: also wait for the wiki_job queue to be "
+                        "fully drained before answering. Off by default because the "
+                        "wiki writer can be slower than the maintainer queues for "
+                        "large documents, so the queue may never converge. Wikis "
+                        "continue async in the background regardless.")
     p.add_argument("--question-timeout", type=float, default=QUESTION_TIMEOUT_SECONDS,
                    help="per-question HTTP timeout on /agent/query")
     return p.parse_args()
@@ -386,6 +493,7 @@ def main() -> int:
                 warmup_timeout=args.warmup_timeout,
                 warmup_settle_seconds=args.warmup_settle_seconds,
                 question_timeout=args.question_timeout,
+                block_on_wiki_queue=args.wait_for_wikis,
             )
             metas.append(meta)
         except Exception as e:

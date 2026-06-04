@@ -29,10 +29,21 @@ BENCH_DATABASE_URL = os.getenv(
     "postgresql://braindb_bench:bench_local_only@localhost:5434/braindb_bench",
 )
 
-# The literal substring every bench DATABASE_URL must contain. If a destructive
-# op is about to fire and the active URL does NOT contain this string, the
-# code refuses to proceed. This is the load-bearing safety check.
-BENCH_DB_SENTINEL = "braindb_bench"
+# Admin URL — connects to Postgres's built-in `postgres` maintenance DB so we
+# can CREATE / DROP per-conversation databases. Same credentials as bench DB.
+BENCH_ADMIN_DATABASE_URL = os.getenv(
+    "BENCH_ADMIN_DATABASE_URL",
+    "postgresql://braindb_bench:bench_local_only@localhost:5434/postgres",
+)
+
+# Allowed DB-name patterns. Every URL passed to destructive ops MUST contain one
+# of these substrings; otherwise we refuse (protection against the personal
+# `braindb` database). Two patterns:
+#   "braindb_bench"   — the shared bench DB (legacy / fallback)
+#   "braindb_conv_"   — per-conversation databases (braindb_conv_001, _002, ...)
+BENCH_DB_SENTINELS = ("braindb_bench", "braindb_conv_")
+# Kept for backwards compatibility (some tests / scripts may import this name).
+BENCH_DB_SENTINEL = BENCH_DB_SENTINELS[0]
 
 # ---- Bench BrainDB API ------------------------------------------------------
 BENCH_API_BASE = os.getenv("BENCH_API_BASE", "http://localhost:8001")
@@ -58,16 +69,19 @@ def _mask_password(url: str) -> str:
 
 
 def assert_bench_database_url(url: str = BENCH_DATABASE_URL) -> None:
-    """REFUSE to proceed unless URL contains the bench sentinel literally.
+    """REFUSE to proceed unless URL contains one of the bench sentinels.
 
     This is intentionally a literal substring check, NOT a hostname/database
     parse, so that misconfigured env vars (typos, copy-paste mishaps) fail
     closed rather than falling through to the personal DB.
+
+    Allowed patterns: ``braindb_bench`` (shared bench DB) or ``braindb_conv_``
+    (per-conversation databases like ``braindb_conv_001``).
     """
-    if BENCH_DB_SENTINEL not in url:
+    if not any(s in url for s in BENCH_DB_SENTINELS):
         raise RuntimeError(
-            f"REFUSING to proceed: connection string must contain "
-            f"{BENCH_DB_SENTINEL!r} as a safety check against operating on "
+            f"REFUSING to proceed: connection string must contain one of "
+            f"{BENCH_DB_SENTINELS!r} as a safety check against operating on "
             f"the personal braindb database. Got: {_mask_password(url)}"
         )
 
@@ -78,7 +92,9 @@ __all__ = [
     "ANSWERS_DIR",
     "RUNS_DIR",
     "BENCH_DATABASE_URL",
+    "BENCH_ADMIN_DATABASE_URL",
     "BENCH_DB_SENTINEL",
+    "BENCH_DB_SENTINELS",
     "BENCH_API_BASE",
     "QWEN_BASE_URL",
     "QWEN_MODEL",
