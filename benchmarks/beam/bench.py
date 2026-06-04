@@ -208,9 +208,17 @@ def restart_api_with_db(database_url: str) -> None:
     # the container was first created via `docker compose up`).
     binds = list(host_cfg.get("Binds") or [])
 
-    # Networks: rejoin all networks the container was on. Use the first as the
-    # primary `network=` arg, then attach the rest after start.
-    networks = list((net_settings.get("Networks") or {}).keys())
+    # Networks: capture name + aliases from each. Compose sets the SERVICE
+    # NAME (`api_bench`) as a network alias so other services can DNS-resolve
+    # it; the SDK doesn't auto-restore that alias on container recreate, so
+    # we must replay it explicitly. We always include "api_bench" as a
+    # fallback alias even if the existing container's aliases came back
+    # empty (which docker inspect does sometimes report).
+    networks_to_connect = {}
+    for net_name, net_cfg in (net_settings.get("Networks") or {}).items():
+        aliases = set(net_cfg.get("Aliases") or [])
+        aliases.add("api_bench")
+        networks_to_connect[net_name] = sorted(aliases)
 
     # Ports: preserve the existing host port mapping.
     port_bindings = {}
@@ -227,15 +235,18 @@ def restart_api_with_db(database_url: str) -> None:
     existing.stop(timeout=30)
     existing.remove()
 
-    # Recreate with same shape + new env.
-    container = client.containers.run(
+    # Recreate with same shape + new env. Use create()+start() instead of
+    # run() so we can connect networks with aliases BEFORE the container
+    # boots (run(network=...) does not accept aliases). Without the alias
+    # replay, the recreated container loses its `api_bench` DNS name and
+    # bench_runner (which talks to it via `http://api_bench:8001`) fails
+    # to resolve it.
+    container = client.containers.create(
         image,
         name="braindb_bench_api",
-        detach=True,
         environment=new_env,
         volumes=binds,
         ports=port_bindings,
-        network=networks[0] if networks else None,
         extra_hosts={
             h.split(":", 1)[0]: h.split(":", 1)[1]
             for h in (host_cfg.get("ExtraHosts") or [])
@@ -248,12 +259,18 @@ def restart_api_with_db(database_url: str) -> None:
         command=cfg["Config"].get("Cmd"),
         working_dir=cfg["Config"].get("WorkingDir") or None,
     )
-    # Attach to additional networks (run() only takes one).
-    for net_name in networks[1:]:
+    # Disconnect from the default bridge that `create` joined the container to,
+    # then attach the captured user-defined networks with their aliases.
+    try:
+        client.networks.get("bridge").disconnect(container, force=True)
+    except docker_sdk.errors.APIError:  # type: ignore[attr-defined]
+        pass  # not on the bridge — fine
+    for net_name, aliases in networks_to_connect.items():
         try:
-            client.networks.get(net_name).connect(container)
+            client.networks.get(net_name).connect(container, aliases=aliases)
         except docker_sdk.errors.NotFound:  # type: ignore[attr-defined]
             pass
+    container.start()
 
 
 def wait_for_api_healthy(timeout: float = 180, poll: float = 2) -> None:
