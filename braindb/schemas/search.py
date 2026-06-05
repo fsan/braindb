@@ -9,7 +9,7 @@ class SearchRequest(BaseModel):
     query: str = Field(..., min_length=1)
     entity_types: list[str] | None = None   # filter to specific types
     min_importance: float = Field(default=0.0, ge=0.0, le=1.0)
-    limit: int = Field(default=20, ge=1, le=100)
+    limit: int = Field(default=20, ge=1, le=10000)
 
 
 class ContextRequest(BaseModel):
