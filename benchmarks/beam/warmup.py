@@ -92,7 +92,7 @@ def wait_for_warmup(
     settle_seconds: float = 600.0,
     consecutive_clear_required: int = 2,
     poll_interval: float = 5.0,
-    timeout_seconds: float = 1800.0,
+    timeout_seconds: float = 43200.0,
     log_interval: float = 10.0,
     verbose: bool = True,
     block_on_wiki_queue: bool = False,
@@ -194,7 +194,10 @@ def _final_stats(conn, start: float) -> dict:
 
 def _cli() -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--timeout", type=float, default=1800)
+    p.add_argument("--timeout", type=float, default=43200,
+                   help="seconds before warmup gives up on convergence (default 43200 = 12h, "
+                        "covers a ~6h 100K-extraction with 2x slack; settle_seconds catches "
+                        "genuine stalls inside this window).")
     p.add_argument("--settle-seconds", type=float, default=600,
                    help="seconds of no INSERT on entities OR relations before declaring "
                         "extraction settled (default 600). Per-chunk extraction agents do "

@@ -381,7 +381,7 @@ def run_one_conversation(
     conv: Conversation,
     run_dir: Path,
     *,
-    warmup_timeout: float = 1800,
+    warmup_timeout: float = 43200,
     warmup_settle_seconds: float = 600,
     question_timeout: float = QUESTION_TIMEOUT_SECONDS,
     block_on_wiki_queue: bool = False,
@@ -539,8 +539,12 @@ def _parse_args() -> argparse.Namespace:
                    help="comma-separated list of conversation_ids to run (overrides --limit ordering)")
     p.add_argument("--fail-fast", action="store_true",
                    help="abort the whole run if any single conversation raises")
-    p.add_argument("--warmup-timeout", type=float, default=1800,
-                   help="seconds before warmup gives up on convergence")
+    p.add_argument("--warmup-timeout", type=float, default=43200,
+                   help="seconds before warmup gives up on convergence (default 43200 = 12h). "
+                        "Must exceed total per-conversation extraction time (a 100K conv takes "
+                        "~5.7h at 1200-word chunks). settle_seconds=600s catches genuine stalls "
+                        "inside this window so the full 12h is only burned in the "
+                        "extraction-keeps-progressing case.")
     p.add_argument("--warmup-settle-seconds", type=float, default=600,
                    help="seconds of quiet on entities AND relations before declaring "
                         "warmup clear (default 600). Per-chunk agents have 2-4 min quiet "
