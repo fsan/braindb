@@ -203,11 +203,22 @@ def find_entities_for_keywords(conn, keyword_entity_ids: list[str]) -> list[dict
         return [dict(r) for r in cur.fetchall()]
 
 
-def generate_missing_embeddings(conn, embedding_service: EmbeddingService) -> dict:
-    """Generate embeddings for all keyword entities that don't have one. Returns stats."""
+def generate_missing_embeddings(
+    conn, embedding_service: EmbeddingService, *, force: bool = False
+) -> dict:
+    """Generate embeddings for keyword entities. Returns stats.
+
+    By default only fills keywords with a NULL embedding. Pass ``force=True``
+    to regenerate *all* keyword embeddings — required after switching the
+    embedding model, since vectors from a different model live in an
+    incompatible space and must not be mixed in the cosine index.
+    """
+    where = "entity_type = 'keyword'"
+    if not force:
+        where += " AND embedding IS NULL"
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(
-            "SELECT id, content FROM entities WHERE entity_type = 'keyword' AND embedding IS NULL"
+            f"SELECT id, content FROM entities WHERE {where}"
         )
         rows = [dict(r) for r in cur.fetchall()]
 

@@ -326,6 +326,6 @@ Then open `http://localhost:8090`. See [frontend/README.md](frontend/README.md) 
 - Python 3.12 + FastAPI + psycopg2 (sync, no ORM)
 - PostgreSQL 16 with `pg_trgm` and `pgvector`
 - Alembic migrations
-- `sentence-transformers` + `Qwen/Qwen3-Embedding-0.6B` for keyword embeddings
+- LiteLLM for keyword embeddings — `ollama/*` direct, others via the LiteLLM proxy; 1024-dim required, set `EMBED_MODEL`
 - `openai-agents[litellm]` + LiteLLM for the internal agent (DeepInfra / NIM / others pluggable via `LLM_PROFILE`)
 - Docker Compose — `api` + `watcher` + `wiki_scheduler` services, external PostgreSQL
