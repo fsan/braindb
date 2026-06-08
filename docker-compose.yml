@@ -19,6 +19,13 @@ services:
       # the scheduler): an entity is wiki-eligible only once created_at is
       # older than this many minutes, so still-ingesting subjects settle first.
       WIKI_FRESHNESS_MINUTES: ${WIKI_FRESHNESS_MINUTES:-30}
+      # Embeddings via LiteLLM (1024-dim required). Empty EMBED_MODEL = text-only.
+      EMBED_MODEL: ${EMBED_MODEL:-}
+      OLLAMA_API_BASE: ${OLLAMA_API_BASE:-http://localhost:11434}
+      OLLAMA_EMBED_API_BASE: ${OLLAMA_EMBED_API_BASE:-}
+      OLLAMA_API_KEY: ${OLLAMA_API_KEY:-}
+      LLM_PROXY_URL: ${LLM_PROXY_URL:-http://localhost:4001}
+      LLM_PROXY_API_KEY: ${LLM_PROXY_API_KEY:-}
     extra_hosts:
       # Lets self-hosted profiles (e.g. vllm_workstation) reach a server bound
       # to the Docker host's loopback. Docker Desktop sets this implicitly;

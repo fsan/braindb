@@ -186,13 +186,19 @@ def _to_safe(value):
 
 
 @router.post("/generate-embeddings")
-def generate_embeddings():
-    """Generate embeddings for all keyword entities that don't have one."""
+def generate_embeddings(
+    force: bool = Query(
+        False,
+        description="Regenerate ALL keyword embeddings, not just missing ones. "
+        "Use after switching the embedding model.",
+    )
+):
+    """Generate keyword embeddings. With ``force=true`` regenerates all of them."""
     emb_svc = get_embedding_service()
     if not emb_svc.is_available():
-        raise HTTPException(503, "Embedding service not available — is sentence-transformers installed?")
+        raise HTTPException(503, "Embedding service not available — is EMBED_MODEL set?")
     with get_conn() as conn:
-        result = generate_missing_embeddings(conn, emb_svc)
+        result = generate_missing_embeddings(conn, emb_svc, force=force)
         log_activity(conn, "generate_embeddings", details=result)
         return result
 
