@@ -7,10 +7,15 @@ The model lazy-loads on first use. If sentence-transformers isn't installed
 or the model fails to load, all methods return None and the system runs text-only.
 """
 import logging
+import os
 
 logger = logging.getLogger(__name__)
 
-EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-0.6B"
+# Model identifier may be a HF model id OR a local directory path.
+# SentenceTransformer(name) accepts a local path, so EMBEDDING_MODEL_PATH
+# lets us load a model baked/synced into a local dir (e.g. from S3 in k8s)
+# without touching the rest of the code. Falls back to the default HF id.
+EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL_PATH") or "Qwen/Qwen3-Embedding-0.6B"
 EMBEDDING_DIM = 1024
 
 
