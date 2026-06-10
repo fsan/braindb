@@ -55,3 +55,4 @@ class RelationUpdate(BaseModel):
     is_bidirectional: bool | None = None
     description: str | None = None
     notes: str | None = None
+    count: int | None = Field(default=None, ge=1)
