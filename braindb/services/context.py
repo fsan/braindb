@@ -379,8 +379,14 @@ def assemble_context(conn, req: ContextRequest) -> ContextResponse:
     # ------------------------------------------------------------------ #
     seed_ids = list(seed_scores.keys())
 
-    if seed_ids and req.max_depth > 0:
-        graph_rows = graph_expand(conn, seed_ids, req.max_depth, req.min_relevance)
+    # The request may ask for up to 3 hops, but the deployment caps traversal
+    # depth via settings.max_graph_depth (env MAX_GRAPH_DEPTH). Graph expansion
+    # is the dominant cost — a recursive CTE whose work grows with fanout^depth
+    # — so this cap is the lever for bounding /memory/context latency.
+    effective_depth = min(req.max_depth, settings.max_graph_depth)
+
+    if seed_ids and effective_depth > 0:
+        graph_rows = graph_expand(conn, seed_ids, effective_depth, req.min_relevance)
     else:
         graph_rows = [{**r, "min_depth": 0, "relevance": 1.0} for r in seed_rows_by_id.values()]
 
