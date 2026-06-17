@@ -46,6 +46,33 @@ def test_search_content_trigram_match_survives_index_rewrite(api, test_tag, make
     assert "Mississippi" in contents, "content trigram match lost after % rewrite"
 
 
+def test_search_title_trigram_match_uses_index(api, test_tag, make_datasource):
+    """Title fuzzy-match must keep working after the title `%`-operator rewrite.
+
+    The title WHERE branch moved from `similarity(COALESCE(e.title,''), q) > 0.2`
+    (seq-scan) to the indexed `e.title % q` (served by entities_title_trgm_idx,
+    migration 008). A misspelled query that is trigram-similar to the TITLE but
+    absent from the body must still surface — proving the title `%` path works
+    and shares the 0.15 SET LOCAL threshold.
+    """
+    make_datasource(
+        content=f"An opaque body with no distinctive terms {test_tag}.",
+        title=f"Worcestershire Sauce {test_tag}",
+    )
+    # "Worcestishire" (misspelled) is trigram-similar to the title token but is
+    # not a tsquery match and does not appear in the content.
+    r = requests.post(
+        f"{api}/api/v1/memory/search",
+        json={"query": f"Worcestishire {test_tag}", "limit": 10},
+        timeout=15,
+    )
+    assert r.status_code == 200
+    body = r.json()
+    items = body if isinstance(body, list) else (body.get("items") or body.get("results") or [])
+    titles = " ".join(str(x.get("title", "")) for x in items)
+    assert "Worcestershire" in titles, "title trigram match lost after % rewrite"
+
+
 def test_context_single_query_returns_structured_response(api, test_tag, make_fact):
     make_fact("Bismuth has the chemical symbol Bi and atomic number 83.")
     r = requests.post(
