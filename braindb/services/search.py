@@ -81,24 +81,23 @@ _SCORE_EXPR = f"""
     AS score
 """
 
-# Both trigram predicates use the `%` operator (not `similarity(...) >
-# threshold`) so Postgres serves them from GIN trigram indexes — content from
-# `entities_trgm_idx`, title from `entities_title_trgm_idx` (migration 008).
-# The bare `similarity() > threshold` form is NOT index-eligible and forces a
-# seq-scan, which tripped statement_timeout as the corpus grew. `%` honours
-# `pg_trgm.similarity_threshold`, which fuzzy_search pins to 0.15 via SET LOCAL.
-# Title now shares that 0.15 cutoff (was a standalone 0.2 `similarity()` check)
-# — a slightly broader candidate gate, immaterial since this is just the WHERE
-# filter; `_SCORE_EXPR` still ranks by title similarity. Use bare `e.title`
-# (not COALESCE) so the GIN index applies; `%` yields NULL→false for NULL
-# titles, correctly excluding them.
+# Content matching is served entirely by the full-text `search_vector` (the AND
+# + OR tsquery branches, GIN-indexed). The content trigram `%` branch was
+# REMOVED: even though it used `entities_trgm_idx`, matching a common term built
+# a huge candidate bitmap whose recheck DETOASTED every candidate's full content
+# body — measured at 7-25s on the prod corpus, the sole component that kept
+# /memory/search timing out. Its marginal recall was ~1 row per query that
+# tsquery didn't already find. Title trigram (`e.title %`) stays: titles are
+# short, never TOASTed, served cheaply by `entities_title_trgm_idx` (migration
+# 008). It uses the `%` operator (honouring `pg_trgm.similarity_threshold`, which
+# fuzzy_search pins to 0.15 via SET LOCAL); bare `e.title` (not COALESCE) so the
+# index applies — `%` yields NULL→false for NULL titles, correctly excluding them.
 _CONTENT_TRGM_THRESHOLD = 0.15
 
 _WHERE_EXPR = f"""
     WHERE (
         e.search_vector @@ plainto_tsquery('english', %s)
         OR e.search_vector @@ {_OR_TSQUERY}
-        OR e.content %% %s
         OR e.title %% %s
     )
 """
@@ -107,8 +106,8 @@ _WHERE_EXPR = f"""
 def fuzzy_search(conn, query: str, entity_types: list[str] | None, min_importance: float, limit: int) -> list[dict]:
     # Score: AND check + AND rank (2) + OR tsquery + NOT AND + OR tsquery rank (3) + title trigram (1) = 6
     score_params = (query,) * 6
-    # Where: AND + OR tsquery + trigram content + trigram title = 4
-    where_params = (query,) * 4
+    # Where: AND tsquery + OR tsquery + title trigram = 3
+    where_params = (query,) * 3
 
     select = f"""
         SELECT
