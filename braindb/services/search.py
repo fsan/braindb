@@ -81,15 +81,17 @@ _SCORE_EXPR = f"""
     AS score
 """
 
-# Content trigram match uses the `%` operator (not `similarity(...) > 0.15`)
-# so Postgres can serve it from the `entities_trgm_idx` GIN index. The bare
-# `similarity() > threshold` form is NOT index-eligible — it forces a seq-scan
-# that detoasts every content body, which trips statement_timeout once the
-# corpus grows. `%` honours `pg_trgm.similarity_threshold`, which fuzzy_search
-# sets to 0.15 via `SET LOCAL` to preserve the previous match cutoff.
-# Title stays on `similarity() > 0.2`: titles are short, never TOASTed, so the
-# seq-scan is cheap there and keeping it lets the two clauses use different
-# cutoffs (0.15 content vs 0.2 title) without juggling the session threshold.
+# Both trigram predicates use the `%` operator (not `similarity(...) >
+# threshold`) so Postgres serves them from GIN trigram indexes — content from
+# `entities_trgm_idx`, title from `entities_title_trgm_idx` (migration 008).
+# The bare `similarity() > threshold` form is NOT index-eligible and forces a
+# seq-scan, which tripped statement_timeout as the corpus grew. `%` honours
+# `pg_trgm.similarity_threshold`, which fuzzy_search pins to 0.15 via SET LOCAL.
+# Title now shares that 0.15 cutoff (was a standalone 0.2 `similarity()` check)
+# — a slightly broader candidate gate, immaterial since this is just the WHERE
+# filter; `_SCORE_EXPR` still ranks by title similarity. Use bare `e.title`
+# (not COALESCE) so the GIN index applies; `%` yields NULL→false for NULL
+# titles, correctly excluding them.
 _CONTENT_TRGM_THRESHOLD = 0.15
 
 _WHERE_EXPR = f"""
@@ -97,7 +99,7 @@ _WHERE_EXPR = f"""
         e.search_vector @@ plainto_tsquery('english', %s)
         OR e.search_vector @@ {_OR_TSQUERY}
         OR e.content %% %s
-        OR similarity(COALESCE(e.title, ''), %s) > 0.2
+        OR e.title %% %s
     )
 """
 
