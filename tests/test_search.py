@@ -20,6 +20,32 @@ def test_search_finds_created_fact(api, test_tag, make_fact):
     assert "Aardvark" in contents
 
 
+def test_search_content_trigram_match_survives_index_rewrite(api, test_tag, make_fact):
+    """Content fuzzy-match must keep working after the `%`-operator rewrite.
+
+    The WHERE clause moved from `similarity(e.content, q) > 0.15` (seq-scan,
+    not index-eligible) to the `%` operator (served by entities_trgm_idx),
+    with pg_trgm.similarity_threshold pinned to 0.15 via SET LOCAL to preserve
+    the cutoff. A misspelled query token that does NOT produce a tsquery match
+    but IS trigram-similar to the content must still surface — proving the
+    content-trigram path (and its 0.15 threshold) is intact, not silently
+    tightened to the pg_trgm default of 0.3.
+    """
+    make_fact(f"Mississippi mud pie is a chocolate dessert {test_tag}.")
+    # "Mississipi" (one s dropped) is not a dictionary/tsquery match but is
+    # highly trigram-similar to "Mississippi" in the content.
+    r = requests.post(
+        f"{api}/api/v1/memory/search",
+        json={"query": f"Mississipi {test_tag}", "limit": 10},
+        timeout=15,
+    )
+    assert r.status_code == 200
+    body = r.json()
+    items = body if isinstance(body, list) else (body.get("items") or body.get("results") or [])
+    contents = " ".join(str(x.get("content", "")) for x in items)
+    assert "Mississippi" in contents, "content trigram match lost after % rewrite"
+
+
 def test_context_single_query_returns_structured_response(api, test_tag, make_fact):
     make_fact("Bismuth has the chemical symbol Bi and atomic number 83.")
     r = requests.post(

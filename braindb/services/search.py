@@ -76,11 +76,22 @@ _SCORE_EXPR = f"""
     AS score
 """
 
+# Content trigram match uses the `%` operator (not `similarity(...) > 0.15`)
+# so Postgres can serve it from the `entities_trgm_idx` GIN index. The bare
+# `similarity() > threshold` form is NOT index-eligible — it forces a seq-scan
+# that detoasts every content body, which trips statement_timeout once the
+# corpus grows. `%` honours `pg_trgm.similarity_threshold`, which fuzzy_search
+# sets to 0.15 via `SET LOCAL` to preserve the previous match cutoff.
+# Title stays on `similarity() > 0.2`: titles are short, never TOASTed, so the
+# seq-scan is cheap there and keeping it lets the two clauses use different
+# cutoffs (0.15 content vs 0.2 title) without juggling the session threshold.
+_CONTENT_TRGM_THRESHOLD = 0.15
+
 _WHERE_EXPR = f"""
     WHERE (
         e.search_vector @@ plainto_tsquery('english', %s)
         OR e.search_vector @@ {_OR_TSQUERY}
-        OR similarity(e.content, %s) > 0.15
+        OR e.content %% %s
         OR similarity(COALESCE(e.title, ''), %s) > 0.2
     )
 """
@@ -119,6 +130,11 @@ def fuzzy_search(conn, query: str, entity_types: list[str] | None, min_importanc
         params = score_params + where_params + (min_importance, limit)
 
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        # The `%` operator in _WHERE_EXPR uses pg_trgm.similarity_threshold
+        # (default 0.3). SET LOCAL pins it to the previous 0.15 content cutoff
+        # for THIS transaction only — it auto-resets on commit/rollback, so a
+        # pooled/reused connection never leaks the lowered threshold.
+        cur.execute("SET LOCAL pg_trgm.similarity_threshold = %s", (_CONTENT_TRGM_THRESHOLD,))
         cur.execute(sql, params)
         rows = [dict(r) for r in cur.fetchall()]
     # Central preview cap — covers /memory/search + quick_search (and the
