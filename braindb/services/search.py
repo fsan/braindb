@@ -1,10 +1,16 @@
 """
 Fuzzy + full-text search against the entities table.
-Uses a 4-tier scoring system:
+Uses a 3-tier scoring system:
   1. AND tsquery match (all words) — weight 1.0
   2. OR tsquery match (any word)  — weight 0.3
-  3. Content trigram similarity    — weight 0.5
-  4. Title trigram similarity      — weight 0.3
+  3. Title trigram similarity      — weight 0.3
+
+Content relevance is captured in the WHERE clause (the `%` trigram operator,
+served by entities_trgm_idx) and the tsquery terms; it is deliberately NOT a
+scoring term. `similarity(e.content, q)` would detoast the full content body
+of every WHERE-matched row during ORDER BY — the exact cost that trips
+statement_timeout once a popular query matches thousands of rows. Ranking by
+tsquery rank + title similarity keeps scoring off the TOASTed column.
 """
 import os
 
@@ -71,7 +77,6 @@ _SCORE_EXPR = f"""
              AND NOT (e.search_vector @@ plainto_tsquery('english', %s))
              THEN ts_rank(e.search_vector, {_OR_TSQUERY}) * 0.3
              ELSE 0 END, 0)
-    + COALESCE(similarity(e.content, %s), 0) * 0.5
     + COALESCE(similarity(COALESCE(e.title, ''), %s), 0) * 0.3
     AS score
 """
@@ -98,8 +103,8 @@ _WHERE_EXPR = f"""
 
 
 def fuzzy_search(conn, query: str, entity_types: list[str] | None, min_importance: float, limit: int) -> list[dict]:
-    # Score: AND check + AND rank (2) + OR tsquery + NOT AND + OR tsquery rank (3) + trigram x2 = 7
-    score_params = (query,) * 7
+    # Score: AND check + AND rank (2) + OR tsquery + NOT AND + OR tsquery rank (3) + title trigram (1) = 6
+    score_params = (query,) * 6
     # Where: AND + OR tsquery + trigram content + trigram title = 4
     where_params = (query,) * 4
 
