@@ -44,6 +44,17 @@ class Settings(BaseSettings):
     database_url: str = "postgresql://braindb:braindb@localhost:5432/braindb"
     api_port: int = 8000
 
+    # Postgres connection pool bounds (psycopg2 ThreadedConnectionPool).
+    # Before pooling, every request opened a fresh psycopg2 connection and
+    # closed it — under the ingestion backfill's high concurrency that meant
+    # constant connect/teardown churn and dozens of uncoordinated backends.
+    # The pool caps concurrent backends (db_pool_max) so a write-heavy
+    # ingestion burst can't exhaust Postgres connections out from under the
+    # human-facing search path. Tune db_pool_max with the worker concurrency
+    # and Postgres max_connections in mind.
+    db_pool_min: int = 1
+    db_pool_max: int = 20
+
     # Temporal decay rates per entity type (per day)
     decay_rate_thought: float = 0.005
     decay_rate_fact: float = 0.001
