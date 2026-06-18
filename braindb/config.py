@@ -55,6 +55,25 @@ class Settings(BaseSettings):
     db_pool_min: int = 1
     db_pool_max: int = 20
 
+    # Access-count tracking (see services/access_tracker.py). Every search /
+    # context call records an access for each returned entity to feed the
+    # `effective_importance` ranking nudge. Writes are BATCHED in memory and
+    # flushed on an interval so concurrent searches over the same hot rows can't
+    # pile into the multi-minute row-lock chains that previously jammed the DB.
+    track_access_enabled: bool = True
+    # Flush cadence. Counts are a soft signal — staleness up to this many
+    # seconds is fine. Larger interval = fewer UPDATEs (more dedup per window).
+    track_access_flush_interval_seconds: int = 30
+    # Force an early flush once this many DISTINCT ids are buffered, bounding
+    # memory and per-flush UPDATE size regardless of the interval.
+    track_access_max_buffer: int = 5000
+    # Per-flush guards (libpq-style duration strings). The flush fails fast
+    # rather than joining a lock queue — a contended flush must never recreate
+    # the pileup this batching exists to prevent. Dropped increments are
+    # acceptable for a soft ranking stat.
+    track_access_lock_timeout: str = "500ms"
+    track_access_statement_timeout: str = "5s"
+
     # Temporal decay rates per entity type (per day)
     decay_rate_thought: float = 0.005
     decay_rate_fact: float = 0.001
