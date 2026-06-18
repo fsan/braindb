@@ -14,6 +14,7 @@ from uuid import UUID
 import psycopg2.extras
 
 from braindb.config import settings
+from braindb.services.access_tracker import track_access as _batched_track_access
 from braindb.schemas.search import ContextRequest, ContextResponse, SearchResultItem
 from braindb.services.embedding_service import get_embedding_service
 from braindb.services.graph import graph_expand
@@ -98,13 +99,12 @@ def fetch_always_on_rules(conn) -> list[dict]:
 # ------------------------------------------------------------------ #
 
 def track_access(conn, ids: list) -> None:
-    if not ids:
-        return
-    with conn.cursor() as cur:
-        cur.execute(
-            "UPDATE entities SET access_count = access_count + 1, accessed_at = now() WHERE id = ANY(%s::uuid[])",
-            ([str(i) for i in ids],),
-        )
+    """Record an access for each id. Delegates to the batched access tracker so
+    concurrent searches over the same hot rows don't pile into row-lock chains.
+    The write is buffered in memory and flushed on an interval — see
+    services/access_tracker.py. `conn` is accepted for call-site compatibility
+    but unused (the flush owns its own connection)."""
+    _batched_track_access(conn, ids)
 
 
 # ------------------------------------------------------------------ #
