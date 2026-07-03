@@ -329,6 +329,14 @@ curl "http://localhost:8000/api/v1/memory/log?since=2026-04-08T00:00:00Z"
 
 Response includes: `id`, `timestamp`, `operation`, `entity_type`, `entity_id`, `details`, `context_note`.
 
+**Retention:** `activity_log` is append-only and pruned automatically —
+rows older than `ACTIVITY_LOG_MAX_AGE_DAYS` (default 3) are deleted, and if
+the table still exceeds `ACTIVITY_LOG_MAX_SIZE_MB` (default 500) afterwards,
+the oldest remaining rows are deleted in batches until back under the cap.
+This is not part of the API request path — run
+`python -m braindb.tools.prune_activity_log` (e.g. from a daily k8s CronJob
+or host cron) to enforce it. See `braindb/services/activity_log.py::prune_activity_log`.
+
 ### Read-only SQL — EXCEPTION tool, not for recall
 
 ⚠ This is **not** a recall/discovery path. A flat SELECT has no embeddings, no
