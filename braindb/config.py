@@ -74,6 +74,23 @@ class Settings(BaseSettings):
     track_access_lock_timeout: str = "500ms"
     track_access_statement_timeout: str = "5s"
 
+    # Activity-log retention (see services/activity_log.py::prune_activity_log,
+    # invoked via `python -m braindb.tools.prune_activity_log` — no in-process
+    # scheduler for this, run it from a k8s CronJob or cron). `activity_log` is
+    # an append-only audit table with no upper bound of its own, so an
+    # unbounded shared-Postgres instance can fill its disk purely from this
+    # table. Two independent caps, both enforced on every run:
+    #   - age:  delete rows older than `activity_log_max_age_days`.
+    #   - size: if the table (incl. indexes) still exceeds
+    #     `activity_log_max_size_mb` after the age prune, delete the oldest
+    #     remaining rows in batches until back under the cap — a safety valve
+    #     for traffic spikes the age window alone wouldn't catch in time.
+    # At prod scale (~276 B/row incl. indexes, ~400k-600k rows/day peak), the
+    # 3-day default keeps ~845k rows (~222 MB) — well under the 500 MB cap,
+    # which exists purely as a backstop.
+    activity_log_max_age_days: int = 3
+    activity_log_max_size_mb: int = 500
+
     # Temporal decay rates per entity type (per day)
     decay_rate_thought: float = 0.005
     decay_rate_fact: float = 0.001
