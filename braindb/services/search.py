@@ -5,10 +5,17 @@ Uses a 3-tier scoring system:
   2. OR tsquery match (any word)  — weight 0.3
   3. Title trigram similarity      — weight 0.3
 
-Content relevance is captured in the WHERE clause (the `%` trigram operator,
-served by entities_trgm_idx) and the tsquery terms; it is deliberately NOT a
+Retrieval is tiered and capped: candidates come from three independently
+index-served subqueries (AND tsquery, title trigram, OR tsquery), each capped
+at SEARCH_TIER_CAP rows, UNIONed by id. Only that bounded candidate set is
+fetched from the heap, scored and sorted. Without the caps a single common
+term can make one branch match a third of the corpus (measured: 500k+ title
+candidates, 360k+ OR-tsquery candidates on the prod corpus) and the bitmap
+heap recheck turns into a full-table I/O storm.
+
+Content relevance is captured by the tsquery tiers; it is deliberately NOT a
 scoring term. `similarity(e.content, q)` would detoast the full content body
-of every WHERE-matched row during ORDER BY — the exact cost that trips
+of every candidate during ORDER BY — the exact cost that trips
 statement_timeout once a popular query matches thousands of rows. Ranking by
 tsquery rank + title similarity keeps scoring off the TOASTed column.
 """
@@ -94,49 +101,67 @@ _SCORE_EXPR = f"""
 # index applies — `%` yields NULL→false for NULL titles, correctly excluding them.
 _CONTENT_TRGM_THRESHOLD = 0.15
 
-_WHERE_EXPR = f"""
-    WHERE (
-        e.search_vector @@ plainto_tsquery('english', %s)
-        OR e.search_vector @@ {_OR_TSQUERY}
-        OR e.title %% %s
-    )
-"""
+# Per-tier candidate cap. Each retrieval tier (AND tsquery / title trigram /
+# OR tsquery) contributes at most this many ids before scoring. Bounds the
+# heap fetch + recheck work for pathological terms; 5k is 100x a typical
+# request limit while staying well under the corpus-scale bitmaps (500k+)
+# that caused multi-minute searches. Benchmarked on the prod corpus (1.7M
+# rows): worst-case term 95s uncapped -> 1.7s at 5k, top results identical.
+SEARCH_TIER_CAP = int(os.getenv("BRAINDB_SEARCH_TIER_CAP", "5000"))
 
 
 def fuzzy_search(conn, query: str, entity_types: list[str] | None, min_importance: float, limit: int) -> list[dict]:
     # Score: AND check + AND rank (2) + OR tsquery + NOT AND + OR tsquery rank (3) + title trigram (1) = 6
     score_params = (query,) * 6
-    # Where: AND tsquery + OR tsquery + title trigram = 3
-    where_params = (query,) * 3
 
-    select = f"""
+    # Shared row filters are pushed into every tier so a cap can never be
+    # consumed by rows the outer query would discard anyway.
+    if entity_types:
+        filters = "AND e.entity_type = ANY(%s) AND e.importance >= %s"
+        filter_params: tuple = (entity_types, min_importance)
+    else:
+        filters = "AND e.importance >= %s"
+        filter_params = (min_importance,)
+
+    tier_and = f"""
+        SELECT e.id FROM entities e
+        WHERE e.search_vector @@ plainto_tsquery('english', %s) {filters}
+        LIMIT %s
+    """
+    tier_title = f"""
+        SELECT e.id FROM entities e
+        WHERE e.title %% %s {filters}
+        LIMIT %s
+    """
+    tier_or = f"""
+        SELECT e.id FROM entities e
+        WHERE e.search_vector @@ {_OR_TSQUERY}
+          AND NOT (e.search_vector @@ plainto_tsquery('english', %s)) {filters}
+        LIMIT %s
+    """
+    tier_params = (
+        (query,) + filter_params + (SEARCH_TIER_CAP,)
+        + (query,) + filter_params + (SEARCH_TIER_CAP,)
+        + (query, query) + filter_params + (SEARCH_TIER_CAP,)
+    )
+
+    sql = f"""
         SELECT
             e.id, e.entity_type, e.title, e.content, e.summary,
             e.keywords, e.importance, e.source, e.notes,
             e.created_at, e.updated_at, e.accessed_at, e.access_count, e.metadata,
             {_SCORE_EXPR}
         FROM entities e
-        {_WHERE_EXPR}
+        JOIN (
+            ({tier_and}) UNION ({tier_title}) UNION ({tier_or})
+        ) candidates ON candidates.id = e.id
+        ORDER BY score DESC
+        LIMIT %s
     """
-
-    if entity_types:
-        sql = select + """
-            AND e.entity_type = ANY(%s)
-            AND e.importance >= %s
-            ORDER BY score DESC
-            LIMIT %s
-        """
-        params = score_params + where_params + (entity_types, min_importance, limit)
-    else:
-        sql = select + """
-            AND e.importance >= %s
-            ORDER BY score DESC
-            LIMIT %s
-        """
-        params = score_params + where_params + (min_importance, limit)
+    params = score_params + tier_params + (limit,)
 
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-        # The `%` operator in _WHERE_EXPR uses pg_trgm.similarity_threshold
+        # The `%` operator in the title tier uses pg_trgm.similarity_threshold
         # (default 0.3). SET LOCAL pins it to the previous 0.15 content cutoff
         # for THIS transaction only — it auto-resets on commit/rollback, so a
         # pooled/reused connection never leaks the lowered threshold.
