@@ -71,6 +71,51 @@ def test_search_title_trigram_match_uses_index(api, test_tag, make_datasource):
     assert "Worcestershire" in titles, "title trigram match lost after % rewrite"
 
 
+def test_search_tiered_retrieval_survives_common_term(api, test_tag, make_fact):
+    """Retrieval is tiered + capped (SEARCH_TIER_CAP per tier). A distinctive
+    doc must still surface for a query whose terms also appear elsewhere —
+    proving the UNION of capped tiers keeps recall for AND-tsquery matches,
+    which are the highest-signal tier and the one the cap must never starve.
+    """
+    token = f"Quokkaberry{test_tag[-4:]}"
+    make_fact(f"The {token} compote uses twice the sugar of plain jam {test_tag}.")
+    r = requests.post(
+        f"{api}/api/v1/memory/search",
+        json={"query": f"{token} compote sugar {test_tag}", "limit": 10},
+        timeout=15,
+    )
+    assert r.status_code == 200
+    body = r.json()
+    items = body if isinstance(body, list) else (body.get("items") or body.get("results") or [])
+    contents = " ".join(str(x.get("content", "")) for x in items)
+    assert token in contents, "AND-tsquery tier lost the distinctive match"
+
+
+def test_search_entity_type_filter_applies_inside_tiers(api, test_tag, make_fact, make_datasource):
+    """entity_types/min_importance filters are pushed INTO each capped tier
+    (not applied after the cap) so filtered-out rows can never consume cap
+    slots. A type-filtered search must return only that type while still
+    finding the matching row.
+    """
+    token = f"Vellumfig{test_tag[-4:]}"
+    make_fact(f"A fact about {token} preserves {test_tag}.")
+    make_datasource(
+        content=f"A datasource about {token} preserves {test_tag}.",
+        title=f"{token} datasource {test_tag}",
+    )
+    r = requests.post(
+        f"{api}/api/v1/memory/search",
+        json={"query": f"{token} {test_tag}", "limit": 10, "entity_types": ["fact"]},
+        timeout=15,
+    )
+    assert r.status_code == 200
+    body = r.json()
+    items = body if isinstance(body, list) else (body.get("items") or body.get("results") or [])
+    matched = [x for x in items if token in str(x.get("content", "")) or token in str(x.get("title", ""))]
+    assert matched, "type-filtered search lost the matching fact"
+    assert all(x.get("entity_type") == "fact" for x in matched), "entity_types filter leaked other types"
+
+
 def test_context_single_query_returns_structured_response(api, test_tag, make_fact):
     make_fact("Bismuth has the chemical symbol Bi and atomic number 83.")
     r = requests.post(
