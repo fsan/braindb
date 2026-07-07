@@ -2,6 +2,7 @@
 CRUD for all entity types.
 """
 import hashlib
+import logging
 from pathlib import Path
 from uuid import UUID
 
@@ -21,9 +22,11 @@ from braindb.schemas.entities import (
     WikiCreate, WikiRead, WikiUpdate,
 )
 from braindb.services.activity_log import log_activity
-from braindb.services.search import slice_content
+from braindb.services.search import embed_text_for_wiki, slice_content
 from braindb.services.embedding_service import get_embedding_service
 from braindb.services.keyword_service import ensure_keyword_entities, link_entity_to_keywords, sync_keywords_for_entity
+
+logger = logging.getLogger(__name__)
 
 INGEST_MAX_BYTES = 5 * 1024 * 1024  # 5 MB
 INGEST_ROOT = Path("/app")  # inside container; can absolute or repo-relative paths resolve
@@ -143,6 +146,34 @@ def _flatten(row: dict) -> dict:
 
 
 # ------------------------------------------------------------------ #
+# Embed-on-write: wiki datasources only (see services/search.py for the    #
+# hybrid-search read path and why wiki articles are the one content type  #
+# that gets per-row embeddings).                                           #
+# ------------------------------------------------------------------ #
+
+def _maybe_embed_wiki_datasource(conn, entity_id, title: str | None, content: str | None, source: str | None) -> None:
+    """Embed + store the vector for a wiki-article datasource, best-effort.
+
+    No-op for anything that isn't `source == 'wiki'`. Embedding failure
+    (service unavailable or the call itself returns None) is not an error —
+    hybrid search already degrades to lexical-only for rows with no
+    embedding, so a skipped write here is a transparent quality note, not a
+    request failure.
+    """
+    if source != "wiki":
+        return
+    emb_svc = get_embedding_service()
+    if not emb_svc.is_available():
+        return
+    vec = emb_svc.embed(embed_text_for_wiki(title, content))
+    if vec is None:
+        logger.info("wiki datasource %s: embedding unavailable, skipping", entity_id)
+        return
+    with conn.cursor() as cur:
+        cur.execute("UPDATE entities SET embedding = %s WHERE id = %s", (str(vec), str(entity_id)))
+
+
+# ------------------------------------------------------------------ #
 # CREATE                                                              #
 # ------------------------------------------------------------------ #
 
@@ -213,6 +244,7 @@ def create_datasource(body: DatasourceCreate):
                 "INSERT INTO datasources_ext (entity_id, file_path, url, content_hash, word_count, language) VALUES (%s, %s, %s, %s, %s, %s)",
                 (str(eid), body.file_path, body.url, body.content_hash, body.word_count, body.language),
             )
+        _maybe_embed_wiki_datasource(conn, eid, body.title, body.content, body.source)
         return _flatten(_fetch(conn, eid))
 
 
@@ -290,6 +322,7 @@ def ingest_datasource(body: IngestRequest):
             "word_count": word_count,
             "content_hash": content_hash[:16],
         })
+        _maybe_embed_wiki_datasource(conn, eid, b.title, b.content, b.source)
         return _flatten(_fetch(conn, eid))
 
 
@@ -461,6 +494,16 @@ def update_datasource(entity_id: UUID, body: DatasourceUpdate):
         data = body.model_dump(exclude_unset=True)
         _update_base(conn, entity_id, data)
         _update_ext(conn, "datasources_ext", entity_id, ["file_path", "url", "content_hash", "word_count", "language"], data)
+        # Gate on the POST-update source, not `row` (the pre-update snapshot):
+        # a PATCH can change `source` to/from "wiki" in the same request, and
+        # checking the stale value would either skip embedding a row that just
+        # became wiki, or embed one that just left it. Also re-embed when
+        # `source` itself changes to "wiki" even with no title/content in this
+        # request — the row's existing title/content still needs a first
+        # embedding once it becomes wiki-eligible.
+        updated = _fetch(conn, entity_id)
+        if updated.get("source") == "wiki" and ("title" in data or "content" in data or "source" in data):
+            _maybe_embed_wiki_datasource(conn, entity_id, updated.get("title"), updated.get("content"), updated.get("source"))
         return _flatten(_fetch(conn, entity_id))
 
 

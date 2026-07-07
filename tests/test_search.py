@@ -205,6 +205,29 @@ def test_tree_endpoint_returns_structure(api, make_fact, make_relation):
     assert body   # not empty or None
 
 
+def test_search_hybrid_mode_returns_valid_shape(api, test_tag, make_fact):
+    """`mode="hybrid"` must be accepted and return the same
+    `SearchResultItem` shape as lexical search. This test's environment has
+    no `EMBED_MODEL` configured (see `.env.example`), so the vector arm is
+    unavailable and `hybrid_search` degrades to the lexical arm verbatim —
+    this proves that degradation path end-to-end through the real endpoint,
+    not just the unit-level monkeypatched version in test_search_hybrid.py.
+    """
+    make_fact(f"Hybrid mode smoke test fact about Capybara grooming habits {test_tag}.")
+    r = requests.post(
+        f"{api}/api/v1/memory/search",
+        json={"query": f"Capybara grooming {test_tag}", "limit": 10, "mode": "hybrid"},
+        timeout=15,
+    )
+    assert r.status_code == 200
+    items = r.json()
+    assert isinstance(items, list)
+    contents = " ".join(str(x.get("content", "")) for x in items)
+    assert "Capybara" in contents
+    for item in items:
+        assert "id" in item and "search_score" in item and "final_rank" in item
+
+
 def test_stats_endpoint_returns_counts(api):
     r = requests.get(f"{api}/api/v1/memory/stats", timeout=10)
     assert r.status_code == 200
