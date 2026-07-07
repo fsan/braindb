@@ -22,7 +22,7 @@ from braindb.services.context import (
     track_access,
 )
 from braindb.services.graph import graph_expand
-from braindb.services.search import fuzzy_search
+from braindb.services.search import fuzzy_search, generate_missing_wiki_embeddings, hybrid_search
 
 router = APIRouter(prefix="/api/v1/memory", tags=["memory"])
 
@@ -30,7 +30,13 @@ router = APIRouter(prefix="/api/v1/memory", tags=["memory"])
 @router.post("/search", response_model=list[SearchResultItem])
 def search(body: SearchRequest):
     with get_conn() as conn:
-        rows = fuzzy_search(conn, body.query, body.entity_types, body.min_importance, body.limit)
+        if body.mode == "hybrid":
+            rows = hybrid_search(
+                conn, body.query, body.entity_types, body.min_importance, body.limit,
+                locale=body.locale, embedding_service=get_embedding_service(),
+            )
+        else:
+            rows = fuzzy_search(conn, body.query, body.entity_types, body.min_importance, body.limit)
         items = []
         for r in rows:
             eff = effective_importance(r["importance"], r["created_at"], r["access_count"], r["entity_type"])
@@ -200,6 +206,28 @@ def generate_embeddings(
     with get_conn() as conn:
         result = generate_missing_embeddings(conn, emb_svc, force=force)
         log_activity(conn, "generate_embeddings", details=result)
+        return result
+
+
+@router.post("/generate-wiki-embeddings")
+def generate_wiki_embeddings(
+    force: bool = Query(
+        False,
+        description="Regenerate ALL wiki-article embeddings, not just missing ones. "
+        "Use after switching the embedding model.",
+    )
+):
+    """Backfill embeddings for wiki-article datasources so `mode='hybrid'`
+    search has vectors to rank against. Run this once after deploying the
+    HNSW index (migration 012) and before relying on hybrid search results —
+    until it completes, `mode='hybrid'` degrades to lexical-only for rows
+    still missing an embedding."""
+    emb_svc = get_embedding_service()
+    if not emb_svc.is_available():
+        raise HTTPException(503, "Embedding service not available — is EMBED_MODEL set?")
+    with get_conn() as conn:
+        result = generate_missing_wiki_embeddings(conn, emb_svc, force=force)
+        log_activity(conn, "generate_wiki_embeddings", details=result)
         return result
 
 

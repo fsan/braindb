@@ -174,3 +174,185 @@ def fuzzy_search(conn, query: str, entity_types: list[str] | None, min_importanc
     for r in rows:
         r["content"] = preview(r.get("content"), r.get("id"))
     return rows
+
+
+# ------------------------------------------------------------------ #
+# Hybrid lexical + vector search (wiki articles only)                 #
+# ------------------------------------------------------------------ #
+# Lexical-only `fuzzy_search` misses paraphrase queries that share no
+# tokens/trigrams with the target article (e.g. "how do birds find their
+# way home" vs a title of "avian magnetoreception"). Wiki articles are the
+# one content type big and stable enough to justify a per-row embedding
+# (~10k rows vs 1.7M total entities) — everything else stays lexical-only.
+# The two retrieval arms are fused with Reciprocal Rank Fusion (RRF) rather
+# than a weighted score blend: RRF only needs each arm's *rank order*, not
+# comparable score scales, which matters here because ts_rank/trigram
+# similarity and cosine similarity are not on the same numeric scale and any
+# hand-picked blend weight would be a guess. k=60 is the standard RRF
+# constant from the original paper — it damps the influence of a single
+# very-high-rank hit from one arm without needing per-deployment tuning.
+
+RRF_K = 60
+_VECTOR_ARM_LIMIT = 100
+
+
+def embed_text_for_wiki(title: str | None, content: str | None) -> str:
+    """Build the text embedded for a wiki article: title carries the most
+    signal per token so it's unclipped; content is capped at 2000 chars —
+    long enough to capture the lead/summary of an article without paying
+    to embed (or re-embed on every edit) an entire long-form body."""
+    return f"{(title or '').strip()}\n\n{(content or '')[:2000].strip()}".strip()
+
+
+def _rrf_fuse(lexical_rows: list[dict], vector_rows: list[dict], k: int = RRF_K) -> list[dict]:
+    """Fuse two ranked row lists by Reciprocal Rank Fusion.
+
+    Each row must have an `id` key. A row present in both arms sums both
+    reciprocal-rank contributions, so it naturally outranks a row found by
+    only one arm. Row *data* is taken from the lexical copy when present
+    (it already has `preview()` applied to `content`); vector-only rows are
+    previewed here so the fused output has a uniform shape either way.
+    Returns rows sorted by fused score desc, each with `score` set to the
+    fused RRF value (replacing whatever `score`/`similarity` field the arm
+    produced — callers must re-read `score` after fusion, not before).
+    """
+    fused: dict[str, float] = {}
+    data: dict[str, dict] = {}
+
+    for rank, row in enumerate(lexical_rows):
+        rid = str(row["id"])
+        fused[rid] = fused.get(rid, 0.0) + 1.0 / (k + rank + 1)
+        data.setdefault(rid, row)
+
+    for rank, row in enumerate(vector_rows):
+        rid = str(row["id"])
+        fused[rid] = fused.get(rid, 0.0) + 1.0 / (k + rank + 1)
+        if rid not in data:
+            row = dict(row)
+            row["content"] = preview(row.get("content"), row.get("id"))
+            data[rid] = row
+
+    merged = []
+    for rid, fscore in fused.items():
+        row = dict(data[rid])
+        row["score"] = fscore
+        merged.append(row)
+
+    merged.sort(key=lambda r: r["score"], reverse=True)
+    return merged
+
+
+def hybrid_search(
+    conn,
+    query: str,
+    entity_types: list[str] | None,
+    min_importance: float,
+    limit: int,
+    *,
+    locale: str | None = None,
+    embedding_service=None,
+) -> list[dict]:
+    """Lexical + vector hybrid search, fused by RRF. Vector recall is scoped
+    to wiki articles only (`entity_type='datasource' AND source='wiki'`) —
+    see module docstring for why.
+
+    `locale`: when given, restricts to wiki articles carrying that
+    `metadata->>'locale'`. Applied as a post-filter on BOTH arms (the vector
+    arm also has it pushed into its SQL WHERE, since that query is already
+    wiki-only and it's free to add there). fuzzy_search has no locale
+    parameter, so the lexical arm's rows are filtered in Python after the
+    call; note this means a locale-filtered hybrid search narrows to wiki
+    articles even though the lexical arm itself considers all entity types
+    — this is intentional: locale-scoped search only exists for wiki
+    (cookpadia's per-locale article pages).
+
+    Degrades to `fuzzy_search` verbatim (same row shape) whenever the vector
+    arm can't run: `entity_types` given without 'datasource' in it, no/
+    unavailable embedding_service, or the embed call itself returns None.
+    """
+    if entity_types and "datasource" not in entity_types:
+        return fuzzy_search(conn, query, entity_types, min_importance, limit)
+
+    lexical_rows = fuzzy_search(conn, query, entity_types, min_importance, max(limit * 5, 100))
+
+    if locale is not None:
+        lexical_rows = [
+            r for r in lexical_rows
+            if r.get("source") == "wiki" and (r.get("metadata") or {}).get("locale") == locale
+        ]
+
+    if embedding_service is None or not embedding_service.is_available():
+        return lexical_rows[:limit]
+
+    vec = embedding_service.embed(query)
+    if vec is None:
+        return lexical_rows[:limit]
+
+    where = "e.entity_type = 'datasource' AND e.source = 'wiki' AND e.embedding IS NOT NULL AND e.importance >= %s"
+    where_params: list = [min_importance]
+    if locale is not None:
+        where += " AND e.metadata->>'locale' = %s"
+        where_params.append(locale)
+
+    sql = f"""
+        SELECT
+            e.id, e.entity_type, e.title, e.content, e.summary,
+            e.keywords, e.importance, e.source, e.notes,
+            e.created_at, e.updated_at, e.accessed_at, e.access_count, e.metadata,
+            1 - (e.embedding <=> %s::vector) AS similarity
+        FROM entities e
+        WHERE {where}
+        ORDER BY e.embedding <=> %s::vector
+        LIMIT %s
+    """
+    # str(vec) passed once per `%s::vector` placeholder occurrence (SELECT,
+    # then ORDER BY) — same pattern as keyword_service.find_similar_keywords.
+    vec_str = str(vec)
+    full_params = [vec_str, *where_params, vec_str, _VECTOR_ARM_LIMIT]
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(sql, tuple(full_params))
+        vector_rows = [dict(r) for r in cur.fetchall()]
+
+    return _rrf_fuse(lexical_rows, vector_rows)[:limit]
+
+
+def generate_missing_wiki_embeddings(
+    conn, embedding_service, *, force: bool = False, batch_size: int = 32
+) -> dict:
+    """Backfill embeddings for wiki-article datasources. Mirrors
+    `keyword_service.generate_missing_embeddings`; separate function because
+    the source table filter and the embedded text (title+content, not a bare
+    keyword string) differ.
+
+    By default only fills rows with a NULL embedding. `force=True`
+    regenerates all wiki embeddings — required after switching the embedding
+    model, since vectors from a different model live in an incompatible
+    space and must not be mixed in the cosine index.
+    """
+    where = "entity_type = 'datasource' AND source = 'wiki'"
+    if not force:
+        where += " AND embedding IS NULL"
+
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(f"SELECT id, title, content FROM entities WHERE {where}")
+        rows = [dict(r) for r in cur.fetchall()]
+
+    if not rows:
+        return {"scanned": 0, "embedded": 0, "failed": 0}
+
+    texts = [embed_text_for_wiki(r.get("title"), r.get("content")) for r in rows]
+    embeddings = embedding_service.embed_batch(texts, batch_size=batch_size)
+
+    if not embeddings:
+        return {"scanned": len(rows), "embedded": 0, "failed": len(rows)}
+
+    embedded = 0
+    with conn.cursor() as cur:
+        for row, emb in zip(rows, embeddings):
+            cur.execute(
+                "UPDATE entities SET embedding = %s WHERE id = %s",
+                (str(emb), str(row["id"])),
+            )
+            embedded += 1
+
+    return {"scanned": len(rows), "embedded": embedded, "failed": len(rows) - embedded}

@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field, model_validator
@@ -10,6 +10,8 @@ class SearchRequest(BaseModel):
     entity_types: list[str] | None = None   # filter to specific types
     min_importance: float = Field(default=0.0, ge=0.0, le=1.0)
     limit: int = Field(default=20, ge=1, le=100)
+    mode: Literal["lexical", "hybrid"] = "lexical"  # "hybrid" adds vector recall over wiki articles, RRF-fused with lexical
+    locale: str | None = None               # wiki-article locale filter (only meaningful with mode="hybrid" / entity_types incl. datasource)
 
 
 class ContextRequest(BaseModel):
